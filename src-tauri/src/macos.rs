@@ -14,7 +14,7 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{msg_send, sel, MainThreadMarker};
 use objc2_app_kit::{
     NSApplication, NSEvent, NSEventMask, NSEventType, NSModalResponseOK, NSOpenPanel, NSView,
-    NSWindow,
+    NSWindow, NSWindowButton,
 };
 use objc2_foundation::{NSString, NSURL};
 
@@ -156,6 +156,26 @@ pub unsafe fn focus_webview(view: *mut c_void) {
 /// Hide the application (Cmd+H), like `-[NSApplication hide:]`.
 pub fn hide_application() {
     NSApplication::sharedApplication(main_thread()).hide(None);
+}
+
+/// Hide the traffic lights of the titled main window, whose titlebar is transparent and
+/// overlaid by the content: the window keeps AppKit's rounded corners, border and shadow
+/// without a visible title bar. tao can do this but Tauri does not expose it.
+///
+/// # Safety
+///
+/// `window` must point to a live `NSWindow`; call on the main thread.
+pub unsafe fn hide_window_buttons(window: *mut c_void) {
+    let window = unsafe { &*window.cast::<NSWindow>() };
+    for kind in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        if let Some(button) = window.standardWindowButton(kind) {
+            button.setHidden(true);
+        }
+    }
 }
 
 /// The window containing `view`, if any.

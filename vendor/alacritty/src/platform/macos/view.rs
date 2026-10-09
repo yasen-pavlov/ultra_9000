@@ -21,6 +21,8 @@
 //!   application chords are handed to the host; unowned native menu chords (including
 //!   Hide Others) pass through to AppKit. Other chords still reach Alacritty.
 //! - embed: Layer-backed left corner masks match CSS; rounded views are not opaque.
+//! - embed: `mouseDownCanMoveWindow` is NO, so a non-opaque view under the host's transparent
+//!   titlebar takes mouse-downs (selection) instead of dragging the window.
 //! - `copy:`/`paste:` responder actions run Alacritty's `Copy`/`Paste` actions for Edit menu
 //!   clicks.
 //! - `insertTab:`/`insertBackTab:` are not implemented so Tab never moves AppKit key view
@@ -255,6 +257,11 @@ declare_class!(
         #[method(isOpaque)]
         fn is_opaque(&self) -> bool {
             self.ivars().corner_radii.get() == [0.; 2]
+        }
+
+        #[method(mouseDownCanMoveWindow)]
+        fn mouse_down_can_move_window(&self) -> bool {
+            false
         }
 
         #[method(viewDidMoveToWindow)]
