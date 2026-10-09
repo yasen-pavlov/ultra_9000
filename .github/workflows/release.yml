@@ -1,0 +1,285 @@
+name: Release
+
+# Pushing a signed annotated tag vX.Y.Z on a commit of main releases that commit: the tag
+# is the version. `prepare` validates the tag and creates a draft GitHub release with notes
+# generated from the Conventional Commits since the previous tag; the build jobs stamp the
+# version into the checkout, build and attach the artifacts; `publish` adds checksums and
+# publishes the draft. Run the workflow manually with an existing tag to retry.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing release tag to build and publish (vX.Y.Z)
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the draft release
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      version: ${{ steps.validate.outputs.version }}
+      commit: ${{ steps.ancestry.outputs.commit }}
+      release_id: ${{ steps.draft.outputs.release_id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+    steps:
+      - name: Validate tag
+        id: validate
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a release tag (vX.Y.Z)."
+            exit 1
+          fi
+          # Releases come from signed, annotated tags only.
+          read -r type sha < <(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object | "\(.type) \(.sha)"')
+          if [ "$type" != "tag" ]; then
+            echo "::error::$TAG is a lightweight tag; create it with 'git tag -s'."
+            exit 1
+          fi
+          read -r verified reason < <(gh api "repos/$REPO/git/tags/$sha" --jq '.verification | "\(.verified) \(.reason)"')
+          if [ "$verified" != "true" ]; then
+            echo "::error::$TAG has no verified signature ($reason)."
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "tag_object=$sha"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.validate.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      # The build jobs check out this exact commit, never the tag name again, so moving the
+      # tag after verification cannot change what is built and published.
+      - name: Require the verified tag, on a commit of main
+        id: ancestry
+        env:
+          TAG_OBJECT: ${{ steps.validate.outputs.tag_object }}
+        run: |
+          if [ "$(git rev-parse "refs/tags/$TAG")" != "$TAG_OBJECT" ]; then
+            echo "::error::$TAG changed after its signature was verified."
+            exit 1
+          fi
+          commit=$(git rev-parse "$TAG^{commit}")
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::$TAG does not point at a commit on main."
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Install git-cliff
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: git-cliff@2.14.2
+      - name: Generate release notes
+        run: |
+          git cliff --current --strip all --output "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      # Reuses an existing draft on retries; never touches a published release.
+      - name: Create the draft release
+        id: draft
+        env:
+          VERSION: ${{ steps.validate.outputs.version }}
+        run: |
+          releases=$(gh api --paginate "repos/$REPO/releases" \
+            --jq '.[] | select(.tag_name == env.TAG) | [.id, .draft] | @tsv')
+          case "$(grep -c . <<< "$releases")" in
+            0)
+              # The id comes from the create response: the release list can lag behind a new
+              # draft for a moment.
+              release_id=$(gh api -X POST "repos/$REPO/releases" \
+                -f tag_name="$TAG" -f name="Ultra 9000 $VERSION" \
+                -F body=@"$RUNNER_TEMP/notes.md" -F draft=true --jq .id)
+              ;;
+            1)
+              read -r release_id draft <<< "$releases"
+              if [ "$draft" != "true" ]; then
+                echo "::error::Release $TAG is already published; refusing to modify it."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Several releases exist for $TAG: $releases"
+              exit 1
+              ;;
+          esac
+          if [[ ! "$release_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::No release id for $TAG (got '$release_id')."
+            exit 1
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS (signed, notarized)
+    needs: prepare
+    runs-on: macos-15
+    permissions:
+      contents: write # upload release assets
+    concurrency:
+      group: release-macos-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Require signing and notarization secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::Missing secrets: ${missing[*]}. Refusing to ship an unsigned macOS build; see docs/releasing.md."
+            exit 1
+          fi
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+          no-cache: true
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Stamp release version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: bun scripts/set-version.ts "$VERSION"
+      - name: Write App Store Connect API key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY.p8"
+          (umask 077 && printf '%s\n' "$APPLE_API_KEY_P8" > "$key_path")
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+      - name: Build, sign, notarize and upload
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        # Signing secrets are scoped to this step so earlier steps (e.g. dependency install
+        # scripts) never see them. APPLE_API_KEY_PATH comes from $GITHUB_ENV.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tauriScript: bun run tauri
+          args: --bundles app,dmg
+          releaseAssetNamePattern: ultra-9000_[version]_[arch][ext]
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+      # The draft is only published after this passes.
+      - name: Verify signature, notarization and stapling
+        run: |
+          app="src-tauri/target/release/bundle/macos/Ultra 9000.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          xcrun stapler validate "$app"
+      - name: Remove API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+
+  arch:
+    name: Arch Linux package
+    needs: prepare
+    runs-on: ubuntu-24.04
+    container:
+      # Rolling distribution: the pinned base image is fully upgraded below. Keep in sync
+      # with the package-arch job in ci.yml.
+      image: archlinux:base-devel-20260927.0.600689@sha256:51dd3d24f7fba779e7c471caeee7804c50e8c134ad948e19685a1c83a42facc3
+    permissions:
+      contents: write # upload release assets
+    concurrency:
+      group: release-arch-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Install git, GitHub CLI and Bun
+        run: pacman -Syu --noconfirm --needed git github-cli bun
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Stamp release version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: bun scripts/set-version.ts "$VERSION"
+      - name: Build package
+        run: packaging/arch/container-build.sh
+      - name: Upload package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          package=$(printf '%s\n' packaging/arch/ultra-9000-"$VERSION"-*-x86_64.pkg.tar.zst)
+          test -f "$package"
+          gh release upload "$TAG" "$package" --repo "$REPO" --clobber
+
+  publish:
+    name: Checksums and publish
+    needs: [prepare, macos, arch]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # upload checksums and publish the release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Download release assets
+        run: gh release download "$TAG" --repo "$REPO" --dir "$RUNNER_TEMP/assets"
+      - name: Check expected assets
+        working-directory: ${{ runner.temp }}/assets
+        run: |
+          ls -l
+          for asset in "ultra-9000_${VERSION}_aarch64.dmg" "ultra-9000_${VERSION}_aarch64.app.tar.gz"; do
+            test -f "$asset" || { echo "::error::Missing asset $asset"; exit 1; }
+          done
+          compgen -G "ultra-9000-${VERSION}-*-x86_64.pkg.tar.zst" > /dev/null \
+            || { echo "::error::Missing Arch package"; exit 1; }
+      - name: Upload SHA256SUMS.txt
+        working-directory: ${{ runner.temp }}/assets
+        run: |
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS.txt"
+          cat "$RUNNER_TEMP/SHA256SUMS.txt"
+          gh release upload "$TAG" "$RUNNER_TEMP/SHA256SUMS.txt" --repo "$REPO" --clobber
+      - name: Publish release
+        run: gh release edit "$TAG" --repo "$REPO" --draft=false --latest

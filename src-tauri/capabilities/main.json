@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Local bundled UI of the main window: workspace/session control commands, workspace-state events and window dragging from the bottom strip. No dialog, shell or filesystem plugin authority; the folder picker is a native app command.",
+  "local": true,
+  "windows": ["main"],
+  "platforms": ["macOS", "linux"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}

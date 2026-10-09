@@ -1,0 +1,46 @@
+name: Bug report
+description: Something does not work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the palette (Ctrl+Shift+Space / Cmd+O)
+        2. …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ultra 9000 version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple Silicon)
+        - Linux (Wayland)
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS version, compositor/desktop (Linux), display scale, keyboard layout, agent tool and version if relevant.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or settings errors
+      description: Terminal output of the app and any settings banner text. Remove credentials and private paths.
+      render: text

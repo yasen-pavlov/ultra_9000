@@ -1,0 +1,886 @@
+/* Ultra 9000 visual system.
+   Chrome is one step darker than the terminal so the content panel reads as an inset. Orange is
+   reserved for "needs you" and the primary action, purple for working, red for errors. Fonts are
+   local stacks only: the CSP forbids remote fonts. */
+:root {
+  --chrome: #181818;
+  --panel: #212121;
+  --well: #1c1c1c;
+  --hover: #272727;
+  --sel: #323232;
+  --line: #2c2c2c;
+  --outline: #474747;
+  --text: #b0bec5;
+  --hi: #e4ebee;
+  --dim: #8c8b8b;
+  --fg: #eeffff;
+  --accent: #ff9800;
+  --blue: #82aaff;
+  --purple: #c792ea;
+  --err: #ff5370;
+  --err-text: #ff8da1;
+  --green: #c3e88d;
+  --yellow: #ffcb6b;
+  /* The background behind a tool tile: chrome by default, panel inside .on-panel; rows hosting
+     tiles set it for hover and selection so the provider plate, badge ring and unread ring match. */
+  --row-bg: var(--chrome);
+  --ui: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --display: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --mono: "JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace;
+
+  color-scheme: dark;
+  font-family: var(--ui);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--chrome);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: default;
+  text-align: inherit;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus {
+  outline: none;
+}
+
+/* Focus is a 2 px blue ring; hover is a faint fill; selection is a solid fill (board 20). */
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.i {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.i.s {
+  width: 12px;
+  height: 12px;
+}
+
+kbd {
+  font-family: var(--ui);
+  font-size: 10.5px;
+  color: var(--dim);
+  border: 1px solid #3c3c3c;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 15px;
+  white-space: nowrap;
+  background: #1e1e1e;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* ---------- tool tiles, provider plate and state badges (boards 23–26) ----------
+   Integer tiles 20 / 24 / 30 with the mark box 12 / 14 / 18 at padding 4 / 5 / 6; 16 is the bare
+   12 px mark. Marks are absolutely placed at whole pixels, never scaled or flex-centred. */
+.tile {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: #2b2b2b;
+  box-shadow: inset 0 0 0 1px #3b3b3b;
+  display: block;
+  color: var(--tile-mark, var(--hi));
+  position: relative;
+  flex: none;
+  pointer-events: none;
+}
+.tile.s20 {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+}
+.tile.s30 {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+.tile.bare {
+  width: 16px;
+  height: 16px;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+.tile > .m {
+  position: absolute;
+  left: 5px;
+  top: 5px;
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+.tile.s20 > .m {
+  left: 4px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+}
+.tile.s30 > .m {
+  left: 6px;
+  top: 6px;
+  width: 18px;
+  height: 18px;
+}
+.tile.bare > .m {
+  left: 2px;
+  top: 2px;
+  width: 12px;
+  height: 12px;
+}
+.tile > .m > svg {
+  display: block;
+}
+/* User files: contained in the mark box; mono is the file's alpha filled with the mark colour. */
+.tile > .contain {
+  object-fit: contain;
+}
+.tile > .mask {
+  background-color: currentColor;
+  -webkit-mask: var(--icon) center / contain no-repeat;
+  mask: var(--icon) center / contain no-repeat;
+}
+/* icon_fill: the logo is the tile surface, clipped to its radius; the hairline stays on top. With
+   icon_tint = "mono" the surface is the logo's alpha in the mark colour (cover, like the image). */
+.tile > .fill {
+  position: absolute;
+  inset: 0;
+  display: block;
+  /* Beat the img width/height attributes so the fill follows 22 px small-strip tiles too. */
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+.tile > .fill.mask {
+  -webkit-mask-size: cover;
+  mask-size: cover;
+}
+.tile > .edge {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px #3b3b3b;
+}
+/* Configured glyph letters (custom tools without a mark), as before the icon family. */
+.tile > .g {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--ui);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.tile.s30 > .g {
+  font-size: 13px;
+}
+.tile.bare > .g {
+  font-size: 9.5px;
+}
+/* Provider plate: 12 px in the row background at (−5, −5), the 10 px logo at (1, 1). */
+.pv {
+  position: absolute;
+  left: -5px;
+  top: -5px;
+  width: 12px;
+  height: 12px;
+  padding: 1px;
+  border-radius: 3px;
+  background: var(--row-bg);
+}
+.on-panel {
+  --row-bg: var(--panel);
+}
+
+.bd {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--row-bg);
+  display: grid;
+  place-items: center;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  color: #1a1100;
+}
+.bd.need {
+  background: var(--accent);
+}
+.bd.err {
+  background: var(--err);
+  color: #22000a;
+}
+/* Exited (board 21 badge contrast): --dim disc keeps the ■ at 5.6:1 and the disc ≥ 3.8:1 on every row background. */
+.bd.exit {
+  background: var(--dim);
+  color: #111;
+}
+/* A shell's foreground job (board 21, decision 20): calm slate disc with a ▸ drawn in CSS, no motion. */
+.bd.job {
+  background: #3a4549;
+  color: #c5d0d5;
+}
+.bd.job::after {
+  content: "";
+  display: block;
+  width: 0;
+  height: 0;
+  margin-left: 1px;
+  border-left: 4px solid currentColor;
+  border-top: 2.5px solid transparent;
+  border-bottom: 2.5px solid transparent;
+}
+.bd.work {
+  background: var(--row-bg);
+  border: 2px solid #4a3a5c;
+  border-top-color: var(--purple);
+  border-right-color: var(--purple);
+  animation: u9kspin 1.1s linear infinite;
+}
+.bd.start {
+  background: var(--row-bg);
+  border: 2px solid #3d3d3d;
+  border-top-color: var(--text);
+  animation: u9kspin 1.1s linear infinite;
+}
+.unread {
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: 2px solid var(--row-bg);
+}
+@keyframes u9kspin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* Spinners stop under reduced motion; the arc stays as a static mark. */
+@media (prefers-reduced-motion: reduce) {
+  .bd.work,
+  .bd.start {
+    animation: none;
+  }
+}
+
+.pill {
+  font-size: 10.5px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid #404040;
+  color: var(--text);
+  white-space: nowrap;
+  flex: none;
+  font-weight: 500;
+}
+.pill.need {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1d1200;
+  font-weight: 650;
+}
+.pill.work {
+  color: var(--purple);
+  border-color: #54426a;
+}
+.pill.turn {
+  color: var(--hi);
+  border-color: #5a5a5a;
+}
+/* Every your-turn shows a pill; a seen one is quieter (board 21, 2026-10-04). */
+.pill.turn.seen {
+  color: #a3a3a3;
+  border-color: #3a3a3a;
+}
+.pill.err {
+  color: var(--err);
+  border-color: #6b2a35;
+}
+.pill.mute {
+  color: var(--dim);
+  border-color: #353535;
+}
+.pill.warn {
+  color: var(--yellow);
+  border-color: #5e4c22;
+}
+.pill.job {
+  color: var(--text);
+  border-color: #404040;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- buttons, fields ---------- */
+.btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid var(--outline);
+  background: #2a2a2a;
+  color: var(--hi);
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  flex: none;
+}
+.btn:hover {
+  background: #313131;
+}
+.btn:disabled {
+  opacity: 0.5;
+}
+.btn:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.btn.sm {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  gap: 6px;
+}
+.btn.xs {
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11.5px;
+  border-radius: 5px;
+}
+.btn.pri {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1d1200;
+  font-weight: 600;
+}
+.btn.pri:hover {
+  background: #ffa31a;
+}
+.btn.pri kbd {
+  color: #4a3000;
+  border-color: #b36b00;
+  background: #ffad33;
+}
+.btn.danger {
+  background: #3a1820;
+  border-color: #7a2c3a;
+  color: #ffb3c0;
+  font-weight: 600;
+}
+.btn.danger kbd {
+  color: #ffb3c0;
+  border-color: #7a2c3a;
+  background: transparent;
+}
+.btn.danger.solid {
+  background: var(--err);
+  border-color: var(--err);
+  color: #22000a;
+}
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+.btn.ghost:hover {
+  background: var(--hover);
+  color: var(--hi);
+}
+
+.iconbtn {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  flex: none;
+  padding: 0;
+  position: relative;
+}
+.iconbtn:hover {
+  background: var(--hover);
+  color: var(--hi);
+}
+.iconbtn.on {
+  background: var(--sel);
+  color: var(--hi);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: var(--well);
+  border: 1px solid #3a3a3a;
+  color: var(--hi);
+  font-size: 13px;
+}
+.field:focus-within {
+  border-color: var(--blue);
+}
+.field.err {
+  border-color: var(--err);
+}
+.field input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  color: var(--hi);
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid #3a3a3a;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--well);
+}
+.seg button {
+  border: 0;
+  background: transparent;
+  padding: 0 10px;
+  height: 26px;
+  font-size: 12px;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+}
+.seg button:hover {
+  color: var(--hi);
+}
+.seg button.on {
+  background: var(--sel);
+  color: var(--hi);
+}
+.seg button:disabled {
+  color: #666;
+}
+
+.switch {
+  width: 30px;
+  height: 18px;
+  border-radius: 999px;
+  background: #3a3a3a;
+  position: relative;
+  flex: none;
+  border: 0;
+  padding: 0;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #9a9a9a;
+}
+.switch.on {
+  background: #7a4a00;
+}
+.switch.on::after {
+  left: 14px;
+  background: var(--accent);
+}
+.switch:focus-visible {
+  outline-offset: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--outline);
+  background: #222;
+  font-size: 11.5px;
+  color: var(--text);
+  white-space: nowrap;
+  flex: none;
+}
+.chip.need {
+  border-color: #7a4a00;
+  color: var(--accent);
+  background: #261c0c;
+}
+.chip.need kbd {
+  color: #b36b00;
+  border-color: #7a4a00;
+  background: transparent;
+}
+
+.pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid #3c3c3c;
+  background: #262626;
+  color: var(--hi);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.pick:hover {
+  border-color: #4c4c4c;
+}
+.pick .i {
+  color: var(--dim);
+}
+.pick:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+/* ---------- content-area sheets (terminal hidden while open) ---------- */
+.sheet {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 28px 28px 20px;
+  overflow: hidden;
+  min-height: 0;
+  position: relative;
+}
+.sheet .card {
+  width: 100%;
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+.sheet.wide .card {
+  max-width: 900px;
+}
+.sheet h2 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 20px;
+  line-height: 26px;
+  font-weight: 600;
+  color: var(--hi);
+  letter-spacing: -0.01em;
+}
+.sheet p {
+  margin: 0;
+  line-height: 1.5;
+}
+.sheet .strong {
+  color: var(--hi);
+  font-weight: 600;
+}
+.hidden-note {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: var(--panel);
+  font-size: 10.5px;
+  color: #6a6a6a;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  pointer-events: none;
+}
+
+.sec {
+  font-size: 11px;
+  line-height: 15px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+  padding: 8px 4px 4px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: none;
+}
+.sec .r {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+/* palette / list rows */
+.pr {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  flex: none;
+  width: 100%;
+  text-align: left;
+}
+button.pr:hover,
+.pr[role="option"]:hover {
+  --row-bg: var(--hover);
+  background: var(--row-bg);
+}
+.pr.sel,
+button.pr.sel:hover,
+.pr[role="option"].sel:hover {
+  --row-bg: var(--sel);
+  background: var(--row-bg);
+}
+.pr .tx {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+/* Integer line boxes (18 + 1 + 15 = 34 under 4 px padding): rows are 42 px, so tiles sit on whole pixels. */
+.pr .t {
+  color: var(--hi);
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pr .t .dis {
+  color: var(--dim);
+}
+.pr .t mark {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 600;
+}
+.pr .s {
+  font-size: 11.5px;
+  line-height: 15px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pr .act {
+  font-size: 11.5px;
+  color: var(--dim);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+  flex: none;
+}
+.pr.sel .act {
+  color: var(--text);
+}
+.pr.dis {
+  opacity: 0.55;
+}
+
+.foot {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--dim);
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  flex: none;
+}
+.foot span {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.menu {
+  position: absolute;
+  z-index: 3;
+  width: 290px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: #262626;
+  border: 1px solid #454545;
+  border-radius: 9px;
+  padding: 5px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 13px;
+}
+.menu .mi {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--hi);
+  width: 100%;
+  text-align: left;
+  flex: none;
+}
+.menu .mi.sel {
+  background: #383838;
+}
+.menu .mi .s {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.menu .mi.dis {
+  color: #777;
+}
+.menu .hr {
+  height: 1px;
+  background: #383838;
+  margin: 4px 2px;
+  flex: none;
+}
+
+/* banners */
+.banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid #5a2430;
+  background: #2a171b;
+  font-size: 12.5px;
+  color: var(--hi);
+  flex: none;
+}
+.banner.warn {
+  border-color: #5e4c22;
+  background: #262014;
+}
+.banner.info {
+  border-color: #2f3d5a;
+  background: #1a1f29;
+}
+.banner .grow {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.banner .muted {
+  color: var(--text);
+}
+.banner code,
+.code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.banner .acts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.scroll {
+  overflow-y: auto;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3a transparent;
+}

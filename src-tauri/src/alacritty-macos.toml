@@ -1,0 +1,9 @@
+
+# macOS-only part of the embedded terminal configuration, appended to alacritty.toml.
+
+[[keyboard.bindings]]
+action = "ToggleViMode"
+# macOS physical left-bracket key; a logical "[" becomes "{" with Shift.
+key = 33
+mode = "~Search"
+mods = "Control|Shift"

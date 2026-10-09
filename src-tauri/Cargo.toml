@@ -1,0 +1,121 @@
+[package]
+name = "ultra9000"
+version = "0.0.0"
+description = "Agent harness with a native Alacritty terminal for macOS and Linux"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yasen-pavlov/ultra_9000"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+# The application is a library so the GUI integration tests (tests/gui_*.rs) can run its
+# production startup on their own main thread; the executable only calls `run`.
+[lib]
+name = "ultra9000_app"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "ultra9000"
+path = "src/main.rs"
+
+# Real-runtime GUI tests. AppKit and GTK must run on the process's main thread, which libtest
+# never provides, so these bring their own `main`.
+[[test]]
+name = "gui_linux"
+harness = false
+
+[[test]]
+name = "gui_macos"
+harness = false
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.1", features = ["image-png"] }
+serde = { version = "1", features = ["derive"] }
+log = { version = "0.4", features = ["std"] }
+libc = "0.2"
+serde_json = "1"
+toml = "1.1"
+toml_edit = "0.25"
+notify = "8"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+base64 = "0.23"
+roxmltree = "0.21"
+png = "0.18"
+
+# Alacritty's renderer/input/event processing hosted in native views (NSView on macOS,
+# GTK/Wayland on Linux; modified upstream copy at def47a5dd511ed20607eb5d9e5e7140afd16b31d,
+# see vendor/PROVENANCE.md).
+alacritty_embed = { path = "../vendor/alacritty" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "=2.12.1", features = ["tray-icon"] }
+# The objc2 0.6 generation that tao/wry use. The vendored terminal keeps objc2 0.5 for its
+# winit-derived view; the embed API takes raw AppKit object pointers, not objc2 types.
+objc2 = "0.6.4"
+# Same block2 generation as objc2 0.6, for the key-down monitor of the physical-bracket
+# tab shortcuts.
+block2 = "0.6.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSString",
+    "NSURL",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSAlert",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSSavePanel",
+    "NSView",
+    "NSWindow",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3.6"
+tokio = { version = "1", features = ["sync"] }
+notify-rust = "4"
+# The GTK 3 bindings Tauri itself uses (same version): dialogs, folder chooser, window
+# shortcuts and the WebKitWebView handle of the terminal host.
+gtk = "0.18"
+
+[dev-dependencies]
+tempfile = "3"
+# Mock runtime (`tauri::test`) for headless command and lifecycle tests.
+tauri = { version = "=2.12.1", features = ["test"] }
+
+# tests/gui_macos.rs reads the application menu AppKit installed and synthesizes a key event
+# for the application key router.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSEvent",
+    "NSGraphicsContext",
+    "NSMenu",
+    "NSMenuItem",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSGeometry",
+    "objc2-core-foundation",
+] }
+
+# Dependencies, including the vendored terminal crates, are optimized in dev
+# builds: an unoptimized parser/grid/renderer is roughly 10x slower.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+debug = 1
+incremental = false

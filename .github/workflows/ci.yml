@@ -1,0 +1,484 @@
+name: CI
+
+on:
+  # Title-only re-checks run in pr-title.yml.
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Superseded PR runs are cancelled; every commit on main is checked.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Native libraries linked by Tauri (WebKitGTK/GTK 3/libsoup 3/D-Bus via tao) and the
+  # vendored terminal (fontconfig, FreeType, libwayland-client). EGL and xkbcommon are
+  # loaded at runtime and need no headers.
+  LINUX_BUILD_DEPS: >-
+    libwebkit2gtk-4.1-dev libgtk-3-dev libfontconfig-dev libfreetype-dev libwayland-dev libdbus-1-dev pkg-config
+  # Cargo.toml builds dependencies at opt-level 3 for interactive terminal speed; CI only
+  # needs them compiled and tested. Config-file profiles override the manifest. Appended to
+  # $CARGO_HOME/config.toml by the Rust jobs.
+  CI_CARGO_PROFILE: |
+    [profile.dev]
+    debug = 0
+    [profile.dev.package."*"]
+    opt-level = 0
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # list a PR's changed files
+    outputs:
+      native: ${{ steps.filter.outputs.native }}
+      packaging: ${{ steps.filter.outputs.packaging }}
+    steps:
+      # Pull requests are diffed through the API; pushes to main are diffed with git.
+      - name: Check out
+        if: github.event_name == 'push'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            native:
+              - 'src-tauri/**'
+              - 'vendor/**'
+              - '.github/workflows/ci.yml'
+            # Everything the release's Arch job reads: the PKGBUILD and the files it installs,
+            # and the files scripts/set-version.ts stamps.
+            packaging:
+              - 'packaging/**'
+              - 'scripts/set-version.ts'
+              - 'package.json'
+              - 'src-tauri/Cargo.toml'
+              - 'src-tauri/Cargo.lock'
+              - 'src-tauri/icons/**'
+              - 'LICENSE-*'
+              - 'THIRD_PARTY_NOTICES.md'
+              - 'vendor/LICENSE-*'
+              - 'vendor/PROVENANCE.md'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/ci.yml'
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      # Vitest 5 runs on Node (>= 22.12); its v8 coverage provider does not work under Bun.
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Type check (svelte-check)
+        run: bun run check
+      - name: Lint (ESLint)
+        run: bun run lint
+      - name: Format check (Prettier)
+        run: bun run format:check
+      - name: Build
+        run: bun run build
+      - name: Audit dependencies
+        run: bun audit --audit-level=high
+      - name: Tests (with coverage)
+        run: bun run test:coverage
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ts-lcov
+          path: coverage/lcov.info
+          retention-days: 1
+
+  rust-linux:
+    name: Rust (Linux)
+    needs: changes
+    # Pushes to main always run, so SonarQube Cloud's main analysis keeps Rust coverage.
+    if: github.event_name == 'push' || needs.changes.outputs.native == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      # The GUI integration test (src-tauri/tests/gui_linux.rs): a headless Wayland compositor
+      # and a private session bus. Sway, not Weston: headless Weston has no wl_seat, and GTK
+      # then logs criticals on its own (a real session always has one).
+      GUI_TEST_DEPS: sway dbus-daemon
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native build dependencies
+        run: |
+          read -ra deps <<< "$LINUX_BUILD_DEPS $GUI_TEST_DEPS"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${deps[@]}"
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt,llvm-tools-preview
+          rustup default stable
+          printf '%s' "$CI_CARGO_PROFILE" >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      # tauri::generate_context! embeds frontendDist (../dist), so the frontend is built first.
+      - name: Build frontend
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Format check (rustfmt)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      # Real-runtime GUI test target (software rendering); sway keeps running for the rest of
+      # the job. In the fresh runtime directory its socket is wayland-1.
+      - name: Start headless Wayland compositor
+        env:
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/xdg-runtime
+          WLR_BACKENDS: headless
+          WLR_RENDERER: pixman
+        run: |
+          mkdir -m 0700 "$XDG_RUNTIME_DIR"
+          sway --config /dev/null > "$RUNNER_TEMP/sway.log" 2>&1 &
+          for _ in $(seq 100); do
+            [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && exit 0
+            sleep 0.1
+          done
+          cat "$RUNNER_TEMP/sway.log"
+          exit 1
+      # Production lines only (test files are excluded); handed to the SonarQube Cloud job.
+      # Includes the GUI test, which must not skip here. `tauri/custom-protocol` (what
+      # `tauri build` ships) makes its window load the bundled UI instead of the dev server.
+      - name: Test app crate (with coverage)
+        env:
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/xdg-runtime
+          WAYLAND_DISPLAY: wayland-1
+          U9K_REQUIRE_GUI_TESTS: "1"
+        run: |
+          dbus-run-session -- cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked \
+            --features tauri/custom-protocol --lcov --output-path lcov.info \
+            --ignore-filename-regex '/(tests|test_support)\.rs$|/src-tauri/tests/'
+          cargo llvm-cov report --manifest-path src-tauri/Cargo.toml --summary-only \
+            --ignore-filename-regex '/(tests|test_support)\.rs$|/src-tauri/tests/'
+          # Repo-relative paths, so reports from different runners resolve in the scan job.
+          perl -pi -e 's{^SF:\Q$ENV{GITHUB_WORKSPACE}\E/}{SF:}' lcov.info
+      # alacritty_embed is a vendored path dependency, not a workspace member, so it is not
+      # instrumented (cargo llvm-cov measures workspace members only).
+      - name: Test alacritty_embed
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -p alacritty_embed --lib
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-lcov
+          path: lcov.info
+          retention-days: 1
+      # The vendored crates are path dependencies, not workspace members, and their lockfiles
+      # are not committed. Seeding them from the app lock tests the versions that ship.
+      - name: Seed vendored lockfiles
+        run: |
+          cp src-tauri/Cargo.lock vendor/alacritty_terminal/Cargo.lock
+          cp src-tauri/Cargo.lock vendor/vte-graphics/Cargo.lock
+      - name: Test alacritty_terminal
+        run: cargo test --manifest-path vendor/alacritty_terminal/Cargo.toml --target-dir src-tauri/target
+      - name: Test vte-graphics
+        run: cargo test --manifest-path vendor/vte-graphics/Cargo.toml --features ansi --target-dir src-tauri/target
+
+  rust-macos:
+    name: Rust (macOS)
+    needs: changes
+    # The macOS runner is the slowest and scarcest; PRs without native changes skip it. Pushes to
+    # main always run, so SonarQube Cloud's main analysis keeps the macOS-only coverage (macos.rs).
+    if: github.event_name == 'push' || needs.changes.outputs.native == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,llvm-tools-preview
+          rustup default stable
+          printf '%s' "$CI_CARGO_PROFILE" >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - name: Build frontend
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Seed vendored lockfiles
+        run: |
+          cp src-tauri/Cargo.lock vendor/alacritty_terminal/Cargo.lock
+          cp src-tauri/Cargo.lock vendor/vte-graphics/Cargo.lock
+      # Includes the GUI test (src-tauri/tests/gui_macos.rs, the runner's logged-in window
+      # server session), which must not skip here.
+      - name: Test app crate (with coverage)
+        env:
+          U9K_REQUIRE_GUI_TESTS: "1"
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --lcov --output-path lcov-macos.info \
+            --ignore-filename-regex '/(tests|test_support)\.rs$|/src-tauri/tests/'
+          cargo llvm-cov report --manifest-path src-tauri/Cargo.toml --summary-only \
+            --ignore-filename-regex '/(tests|test_support)\.rs$|/src-tauri/tests/'
+          perl -pi -e 's{^SF:\Q$ENV{GITHUB_WORKSPACE}\E/}{SF:}' lcov-macos.info
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-lcov-macos
+          path: lcov-macos.info
+          retention-days: 1
+      - name: Test alacritty_embed
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -p alacritty_embed --lib
+      # Includes the macOS-relevant drop_stops_foreground_job_ignoring_hangup regression.
+      - name: Test alacritty_terminal
+        run: cargo test --manifest-path vendor/alacritty_terminal/Cargo.toml --target-dir src-tauri/target
+      - name: Test vte-graphics
+        run: cargo test --manifest-path vendor/vte-graphics/Cargo.toml --features ansi --target-dir src-tauri/target
+
+  msrv:
+    name: MSRV
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.native == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install native build dependencies
+        run: |
+          read -ra deps <<< "$LINUX_BUILD_DEPS"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${deps[@]}"
+      - name: Install MSRV toolchain
+        id: msrv
+        run: |
+          msrv=$(cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "ultra9000") | .rust_version')
+          echo "MSRV from src-tauri/Cargo.toml: $msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          printf '%s' "$CI_CARGO_PROFILE" >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          echo "toolchain=$msrv" >> "$GITHUB_OUTPUT"
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - name: Build frontend
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check with MSRV
+        env:
+          TOOLCHAIN: ${{ steps.msrv.outputs.toolchain }}
+        run: cargo "+$TOOLCHAIN" check --manifest-path src-tauri/Cargo.toml --locked --all-targets
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check advisories, bans, licenses and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          arguments: --locked --config deny.toml
+          command: check
+          command-arguments: --hide-inclusion-graph
+
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$archive"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+      - name: Install zizmor
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: zizmor@1.30.1
+      - name: actionlint
+        run: '"$RUNNER_TEMP/actionlint" -color'
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format=github .github
+
+  package-arch:
+    name: Arch package
+    needs: changes
+    # Builds the release's Arch package path so a PKGBUILD regression fails here, not on
+    # release day.
+    if: needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    container:
+      # Keep in sync with the arch job in release.yml.
+      image: archlinux:base-devel-20260927.0.600689@sha256:51dd3d24f7fba779e7c471caeee7804c50e8c134ad948e19685a1c83a42facc3
+    permissions:
+      contents: read
+    steps:
+      # PKGBUILD copies `git ls-files`, so the checkout must be a real git clone.
+      - name: Install git and Bun
+        run: pacman -Syu --noconfirm --needed git bun
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Same steps as the release job, with a throwaway version.
+      - name: Stamp a test version
+        run: bun scripts/set-version.ts 0.0.1
+      - name: Build package
+        run: packaging/arch/container-build.sh
+
+  sonar:
+    name: SonarQube Cloud
+    needs: [frontend, rust-linux, rust-macos]
+    # Scans the sources with the coverage reports from Frontend, Rust (Linux) and Rust
+    # (macOS); compiles nothing. Rust coverage is absent on PRs that skip Rust (no native
+    # changes). Fork PRs receive no secrets; Dependabot PRs read SONAR_TOKEN from the
+    # Dependabot secret store. Everywhere else a missing SONAR_TOKEN is a configuration error.
+    if: >-
+      !cancelled() &&
+      needs.frontend.result == 'success' &&
+      (needs.rust-linux.result == 'success' || needs.rust-linux.result == 'skipped') &&
+      (needs.rust-macos.result == 'success' || needs.rust-macos.result == 'skipped') &&
+      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Require SONAR_TOKEN
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::SONAR_TOKEN is not set; see docs/releasing.md (SonarQube Cloud)."
+            exit 1
+          fi
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Download TypeScript coverage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ts-lcov
+          path: coverage
+      - name: Download Rust coverage (Linux)
+        if: needs.rust-linux.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-lcov
+      - name: Download Rust coverage (macOS)
+        if: needs.rust-macos.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-lcov-macos
+      - name: Scan
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  ci-ok:
+    name: CI ok
+    if: always()
+    needs: [changes, frontend, rust-linux, rust-macos, msrv, deny, workflow-lint, package-arch, sonar]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every job to succeed or be skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *)
+                echo "::error::A required job finished with '$result'."
+                exit 1
+                ;;
+            esac
+          done

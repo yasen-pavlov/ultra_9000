@@ -1,0 +1,10 @@
+
+# Linux-only part of the embedded terminal configuration, appended to alacritty.toml.
+
+[[keyboard.bindings]]
+action = "ToggleViMode"
+# Linux evdev physical left-bracket key (KEY_LEFTBRACE); a logical "[" becomes "{" with
+# Shift.
+key = 26
+mode = "~Search"
+mods = "Control|Shift"

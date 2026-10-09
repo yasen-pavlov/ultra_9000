@@ -1,0 +1,71 @@
+# Alacritty configuration for the embedded terminal.
+#
+# Bundled project defaults: JetBrainsMono Nerd Font, material-dark colors and
+# left Option as Alt. No user/global configuration is loaded at runtime.
+# Window-management options (decorations, dimensions) belong to the embedder;
+# unspecified terminal settings use Alacritty's defaults. Bindings of physical keys
+# (scancodes are platform specific) are appended from alacritty-macos.toml or
+# alacritty-linux.toml.
+
+[window]
+# Empty so the embedder shows the shell name until the shell sets a title.
+title = ""
+dynamic_padding = false
+option_as_alt = "OnlyLeft"
+
+[font]
+size = 15.0
+
+[font.normal]
+family = "JetBrainsMono Nerd Font"
+style = "Regular"
+
+[font.bold]
+family = "JetBrainsMono Nerd Font"
+style = "Bold"
+
+[font.italic]
+family = "JetBrainsMono Nerd Font"
+style = "Italic"
+
+[font.bold_italic]
+family = "JetBrainsMono Nerd Font"
+style = "Bold Italic"
+
+# material_dark
+[colors]
+draw_bold_text_with_bright_colors = false
+
+[colors.primary]
+background = "0x212121"
+foreground = "0xeeffff"
+
+[colors.cursor]
+cursor = "0xeeffff"
+text = "0x212121"
+
+[colors.normal]
+black = "0x212121"
+blue = "0x82aaff"
+cyan = "0x89ddff"
+green = "0xc3e88d"
+magenta = "0xc792ea"
+red = "0xf07178"
+white = "0xeeffff"
+yellow = "0xffcb6b"
+
+[colors.bright]
+black = "0x4a4a4a"
+blue = "0xb2ccd6"
+cyan = "0xff5370"
+green = "0x303030"
+magenta = "0xeeffff"
+red = "0xf78c6c"
+white = "0xffffff"
+yellow = "0x353535"
+
+# The application palette owns this chord. Vi mode remains on Ctrl+Shift+[.
+[[keyboard.bindings]]
+key = "Space"
+mods = "Control|Shift"
+action = "None"

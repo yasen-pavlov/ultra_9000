@@ -1,0 +1,47 @@
+# Frontend
+node_modules/
+dist/
+
+# Rust / Tauri
+target/
+src-tauri/gen/schemas/
+vendor/*/Cargo.lock
+
+# Analysis reports (CI / SonarQube Cloud)
+lcov.info
+coverage/
+
+# Arch package builds (makepkg in packaging/arch)
+/packaging/arch/src/
+/packaging/arch/pkg/
+*.pkg.tar.zst
+
+# Maintainer-local notes (design records, contracts, handoff), model evaluation and verification
+# artifacts; docs/design is a local symlink into docs/local
+/docs/local/
+/docs/design
+
+# Machine-specific agent configuration and session data
+/.omp/
+
+# Credentials and local environment overrides
+.env
+.env.*
+!.env.example
+.npmrc
+.netrc
+*.key
+*.pem
+*.p12
+*.pfx
+*.p8
+
+# Local caches, databases and diagnostic output
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.dSYM/
+
+# macOS
+.DS_Store

@@ -1,0 +1,50 @@
+version: 2
+
+# Commit prefixes follow Conventional Commits so Dependabot PR titles pass the PR title
+# check: "build(deps): ..." for Cargo and Bun, "ci(deps): ..." for GitHub Actions.
+# Minor and patch updates are grouped per ecosystem; major updates get their own PRs.
+updates:
+  # The vendored Alacritty crates (vendor/) are path dependencies of src-tauri. Dependabot
+  # fetches their manifests read-only to resolve the graph and never edits them.
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      bun-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # TS 7 has no JS compiler API for typescript-eslint/svelte-check; revisit when typescript-eslint#10940 closes.
+      - dependency-name: typescript
+        versions: ["7.x"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]

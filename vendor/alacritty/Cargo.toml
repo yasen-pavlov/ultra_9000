@@ -1,0 +1,118 @@
+# Modified copy of alacritty/Cargo.toml from
+# https://github.com/alacritty/alacritty at def47a5dd511ed20607eb5d9e5e7140afd16b31d
+# (alacritty 0.16.0-dev). See ../PROVENANCE.md for the list of modified files.
+#
+# The binary crate is turned into a library that hosts the upstream Alacritty
+# display, renderer, input and event processing inside embedder-provided native
+# views (an AppKit NSView on macOS; a GTK input widget plus a Wayland subsurface
+# on Linux) instead of a winit window/event loop.
+
+[package]
+name = "alacritty_embed"
+version = "0.16.0-dev"
+authors = ["Christian Duerr <contact@christianduerr.com>", "Joe Wilm <joe@jwilm.com>"]
+license = "Apache-2.0"
+description = "Alacritty's native renderer and input handling hosted inside embedder-owned native views"
+edition = "2021"
+rust-version = "1.74.0"
+publish = false
+
+[lib]
+name = "alacritty_embed"
+path = "src/lib.rs"
+
+[dependencies.alacritty_terminal]
+path = "../alacritty_terminal"
+version = "0.25.1-dev"
+
+[dependencies.alacritty_config_derive]
+path = "../alacritty_config_derive"
+version = "0.2.5-dev"
+
+[dependencies.alacritty_config]
+path = "../alacritty_config"
+version = "0.2.3-dev"
+
+[dependencies]
+ahash = { version = "0.8.6", features = ["no-rng"] }
+bitflags = "2.2.1"
+copypasta = { version = "0.10.1", default-features = false }
+crossfont = "0.8.0"
+glutin = { version = "0.32.2", default-features = false }
+home = "0.5.5"
+libc = "0.2"
+log = { version = "0.4", features = ["std", "serde"] }
+parking_lot = "0.12.0"
+serde = { version = "1", features = ["derive"] }
+smallvec = { version = "1.13.1", features = ["serde"] }
+toml = "0.8.2"
+unicode-width = "0.1"
+# Only winit's public key/mouse/modifier/dpi types are used. No winit EventLoop or
+# Window is ever instantiated (see src/host.rs). On Linux winit's `wayland` feature is
+# enabled below only because winit refuses to build without a Linux backend; it also
+# provides the public evdev scancode mapping (`PhysicalKeyExtScancode`).
+winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde"] }
+
+[build-dependencies]
+gl_generator = "0.14.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Same objc2 generation as upstream Alacritty and winit 0.30.9, whose macOS view
+# code src/platform/macos is derived from.
+objc2 = "0.5.2"
+objc2-foundation = { version = "0.2.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSAttributedString",
+    "NSData",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSGeometry",
+    "NSLocale",
+    "NSNotification",
+    "NSObjCRuntime",
+    "NSPathUtilities",
+    "NSRange",
+    "NSString",
+    "NSThread",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.2.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSColorSpace",
+    "NSCursor",
+    "NSEvent",
+    "NSGraphics",
+    "NSImage",
+    "NSImageRep",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSTextInputClient",
+    "NSTextInputContext",
+    "NSTrackingArea",
+    "NSView",
+    "NSWindow",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Upstream Alacritty's Linux Wayland path (its `wayland` feature, without X11 and without
+# dlopen: libwayland-client is already linked by GTK): EGL on the Wayland display and winit's
+# Linux key types. The clipboard is GTK's (see src/clipboard.rs), not copypasta's Wayland one.
+glutin = { version = "0.32.2", default-features = false, features = ["egl", "wayland"] }
+winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde", "wayland"] }
+# The GTK 3 stack Tauri/wry already use (same versions), hosting the input widgets.
+gtk = "0.18"
+gdkwayland-sys = "0.18"
+# Per-session wl_surface/wl_subsurface on the GTK Wayland connection.
+wayland-backend = { version = "0.3.10", features = ["client_system"] }
+wayland-client = "0.31.10"
+# Keysym constants and `xkb_keysym_to_utf8`, as used by winit's Linux keyboard code
+# (src/platform/linux/keyboard.rs is derived from it).
+xkbcommon-dl = "0.4.2"
+
+[lints.rust]
+# Upstream Linux/Windows code paths are kept verbatim behind these features.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("x11", "wayland", "nightly"))'] }

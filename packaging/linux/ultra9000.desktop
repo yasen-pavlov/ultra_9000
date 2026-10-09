@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Ultra 9000
+GenericName=Agent Harness
+Comment=Agents, shells and Neovim in native Alacritty terminals, grouped by project
+Exec=ultra9000
+Icon=ultra-9000
+Terminal=false
+Categories=Development;
+Keywords=agent;terminal;alacritty;shell;neovim;
+StartupWMClass=ultra9000
