@@ -117,7 +117,6 @@ fn kind(effect: &Effect) -> &'static str {
         Effect::SettingsState(_) => "settings-state",
         Effect::Discovery(..) => "discovery",
         Effect::Bind(..) => "bind",
-        Effect::Model(..) => "model",
         Effect::Probe(_) => "probe",
     }
 }
@@ -348,31 +347,6 @@ fn pending_bindings_resolve_when_the_session_file_appears() {
     // A session file that already exists binds immediately.
     worker.handle(Request::Bind("item-3".into(), "omp".into(), "s2".into()));
     assert_eq!(kinds(&drain(&rx)), ["bind"]);
-}
-
-#[test]
-fn model_requests_report_the_sessions_latest_default_model() {
-    let f = Fixture::new();
-    let (mut worker, rx) = f.worker();
-    drain(&rx);
-    let path = f.omp_session(
-        "s1",
-        "Model",
-        "{\"type\":\"model_change\",\"model\":\"first\"}\n{\"type\":\"model_change\",\"model\":\"second\"}\n",
-    );
-    worker.handle(Request::Model(
-        "item".into(),
-        "s1".into(),
-        path.to_string_lossy().into(),
-    ));
-    let effects = drain(&rx);
-    let [Effect::Model(item, session, model)] = effects.as_slice() else {
-        panic!("expected one model update, got {:?}", kinds(&effects))
-    };
-    assert_eq!(
-        (item.as_str(), session.as_str(), model.as_deref()),
-        ("item", "s1", Some("second"))
-    );
 }
 
 #[test]

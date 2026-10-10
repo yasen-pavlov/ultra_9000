@@ -15,6 +15,7 @@ mod logger;
 #[cfg(target_os = "macos")]
 mod macos;
 mod notify;
+mod omp_link;
 mod runtime;
 mod shortcuts;
 mod status;
@@ -115,6 +116,7 @@ fn app() -> App {
             commands::app_request_quit,
         ])
         .setup(|app| {
+            omp_link::start();
             workspace::init(app.handle().clone());
             #[cfg(target_os = "macos")]
             macos::install_terminate_hook(lifecycle::confirm_and_stop_sessions);
@@ -175,8 +177,11 @@ fn on_run_event(app: &AppHandle, event: RunEvent) {
         RunEvent::ExitRequested {
             code: None, api, ..
         } => api.prevent_exit(),
-        // Final teardown; a no-op when the confirmed quit already stopped every session.
-        RunEvent::Exit => workspace::shutdown_all(),
+        // Final teardown; stopping sessions is a no-op when the confirmed quit already did.
+        RunEvent::Exit => {
+            workspace::shutdown_all();
+            omp_link::shutdown();
+        }
         _ => (),
     }
 }

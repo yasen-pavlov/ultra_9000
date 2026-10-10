@@ -50,9 +50,6 @@ pub enum Event {
     /// Terminal bell ring.
     Bell,
 
-    /// embed: Bounded OSC 777 text after the numeric selector; never log its contents.
-    HostNotify(String),
-
     /// Shutdown request.
     Exit,
 
@@ -74,8 +71,6 @@ impl Debug for Event {
             Event::ResetTitle => write!(f, "ResetTitle"),
             Event::Wakeup => write!(f, "Wakeup"),
             Event::Bell => write!(f, "Bell"),
-            // embed: Payloads can contain conversation snippets; redact even in debug mode.
-            Event::HostNotify(_) => write!(f, "HostNotify"),
             Event::Exit => write!(f, "Exit"),
             Event::ChildExit(code) => write!(f, "ChildExit({code})"),
         }

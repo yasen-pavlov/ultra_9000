@@ -1,4 +1,4 @@
-//! OMP fixed title slot and legacy headers; authoritative slot, bounded model reads.
+//! OMP fixed title slot and legacy headers; authoritative slot, bounded reads.
 use super::{conversation, metadata::Record, model, records, timestamp, windows, Conversation};
 use std::{io, path::Path};
 pub(super) fn read(tool: &str, path: &Path, updated: i64) -> io::Result<Option<Conversation>> {
@@ -76,13 +76,6 @@ fn parse_with_stubs(
         ),
         _ => None,
     })
-}
-pub fn omp_latest_model(path: &Path) -> Option<String> {
-    let w = windows(path, 4 * 1024, 32 * 1024).ok()?;
-    records(&w.prefix)
-        .chain(records(&w.tail))
-        .filter_map(|r| model(&r))
-        .last()
 }
 #[cfg(test)]
 mod tests;

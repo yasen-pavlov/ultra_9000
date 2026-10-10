@@ -274,16 +274,6 @@ fn model_reads_default_changes_and_assistant_messages() {
         None
     );
     assert_eq!(m(json!({"type": "session", "model": "m"})), None);
-    let dir = Scratch::new("latest-model");
-    let path = dir.jsonl(
-        "s.jsonl",
-        &[
-            json!({"type": "model_change", "model": "first"}),
-            json!({"type": "message", "message": {"role": "assistant", "model": "last", "provider": "p"}}),
-        ],
-    );
-    assert_eq!(omp_latest_model(&path).as_deref(), Some("p/last"));
-    assert_eq!(omp_latest_model(&dir.0.join("missing.jsonl")), None);
 }
 
 #[test]

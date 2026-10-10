@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { itemState, toolInfo } from "../test/fixtures";
 import { clockTime } from "./format";
-import { itemView, type ItemViewContext } from "./items";
+import { itemView, onJobNote, type ItemViewContext } from "./items";
 import type { ItemState } from "./native";
 
 const NOW = new Date(2026, 9, 4, 14, 0).getTime();
@@ -162,5 +162,60 @@ describe("itemView: running agents", () => {
   it("shows no badge or age for an agent whose status is unknown", () => {
     const view = itemView(item({ activity: "unknown", model: "gpt-6.1" }), context);
     expect(view).toMatchObject({ badge: "", pill: "", sub: "OMP · gpt 6.1 · running", stateText: "running" });
+  });
+});
+
+describe("itemView: an agent on its own background jobs", () => {
+  const test = { kind: "bash", label: "bun run test", startedAtMs: NOW - 5 * MINUTE };
+  const dev = { kind: "bash", label: "vite dev", startedAtMs: NOW - 90 * MINUTE };
+  const build = { kind: "task", label: "cargo build --release", startedAtMs: NOW - 80 * MINUTE };
+
+  it("shows one job's label where the age sits and the age in the pill", () => {
+    const view = itemView(
+      item({
+        activity: "on-job",
+        model: "anthropic/claude-opus-5-5",
+        stateSince: NOW - 4 * MINUTE,
+        backgroundJobs: [test],
+      }),
+      context,
+    );
+    expect(view).toMatchObject({
+      badge: "wait",
+      pill: "on job 4m",
+      pillClass: "wait",
+      sub: "OMP · opus 5.5 · bun run test",
+    });
+  });
+
+  it("counts several jobs in the pill and lists their labels oldest first", () => {
+    const view = itemView(
+      item({ activity: "on-job", stateSince: NOW - 75 * MINUTE, backgroundJobs: [dev, build] }),
+      context,
+    );
+    expect(view.pill).toBe("on 2 jobs 1h");
+    expect(view.sub).toBe("OMP · vite dev, cargo build --release");
+  });
+
+  it("names the background jobs in its accessible state", () => {
+    expect(itemView(item({ activity: "on-job", backgroundJobs: [test] }), context).stateText).toBe(
+      "waiting on 1 background job",
+    );
+    expect(itemView(item({ activity: "on-job", backgroundJobs: [dev, build] }), context).stateText).toBe(
+      "waiting on 2 background jobs",
+    );
+  });
+
+  it("puts each job's full label, kind and start time in the tooltip", () => {
+    const view = itemView(item({ activity: "on-job", backgroundJobs: [dev, build] }), context);
+    expect(view.tooltip).toBe(
+      `vite dev — bash, since ${clockTime(dev.startedAtMs)}\ncargo build --release — task, since ${clockTime(build.startedAtMs)}`,
+    );
+  });
+
+  it("tells the user in the context bar that they can type while the jobs run", () => {
+    expect(onJobNote(item({ activity: "on-job", backgroundJobs: [dev, build] }))).toBe(
+      "vite dev · cargo build --release · you can type; the agent resumes when they end",
+    );
   });
 });

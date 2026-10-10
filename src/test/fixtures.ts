@@ -21,6 +21,7 @@ export function itemState(overrides: Partial<ItemState> = {}): ItemState {
     stateSince: 0,
     pid: 4242,
     foregroundJob: null,
+    backgroundJobs: [],
     ...overrides,
   };
 }

@@ -21,6 +21,7 @@ fn item(id: &str, activity: Activity, since: u64) -> ItemState {
         state_since: since,
         pid: None,
         foreground_job: None,
+        background_jobs: Vec::new(),
     }
 }
 fn model(items: &[ItemState], visible: bool) -> TrayModel {
@@ -105,6 +106,12 @@ fn markers_lead_the_title_and_detail_keeps_words() {
     assert_eq!(
         entry(&i, "π", "atlas", false).label,
         "π …  API investigation"
+    );
+    i.activity = Activity::OnJob;
+    let on_job = entry(&i, "π", "atlas", false);
+    assert_eq!(
+        (on_job.label.as_str(), on_job.detail.as_str()),
+        ("π …  API investigation", "atlas · on job")
     );
     i.activity = Activity::YourTurn;
     assert_eq!(

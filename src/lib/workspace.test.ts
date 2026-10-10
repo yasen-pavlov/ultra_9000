@@ -77,7 +77,7 @@ describe("derived presentation", () => {
     expect(workspace.disambiguation.has("b1")).toBe(false);
   });
 
-  it("orders waiting items: needs-you oldest first, then unread your-turn oldest first", () => {
+  it("orders waiting items: needs-you oldest first, then unread your-turn oldest first; agents on job never wait", () => {
     workspace.state = workspaceState({
       items: [
         itemState({ id: "turn-new", activity: "your-turn", unread: true, stateSince: 50 }),
@@ -86,6 +86,7 @@ describe("derived presentation", () => {
         itemState({ id: "turn-old", activity: "your-turn", unread: true, stateSince: 10 }),
         itemState({ id: "need-old", activity: "needs-you", stateSince: 30 }),
         itemState({ id: "working", activity: "working", stateSince: 0 }),
+        itemState({ id: "on-job", activity: "on-job", stateSince: 0 }),
       ],
     });
     expect(workspace.waiting.map((item) => item.id)).toEqual(["need-old", "need-new", "turn-old", "turn-new"]);

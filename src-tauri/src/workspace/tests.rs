@@ -227,6 +227,7 @@ fn item(id: &str) -> ItemState {
         state_since: 1,
         pid: None,
         foreground_job: None,
+        background_jobs: Vec::new(),
     }
 }
 #[test]
@@ -338,66 +339,43 @@ fn removal_uses_mru_not_adjacent_launch_order() {
     assert_eq!(selection_fallback(&strings(&["gone"]), &[]), None);
 }
 #[test]
-fn title_derivation_and_spinner_churn() {
+fn title_derivation() {
+    let omp =
+        |name, raw, conversation| derived_title(StatusSource::Omp, name, raw, conversation, "OMP");
     assert_eq!(
-        derived_title(
-            StatusSource::Omp,
-            None,
-            "π > atlas",
-            "/atlas",
-            Some("API investigation"),
-            "OMP"
-        ),
+        omp(Some("Fix login"), "π > atlas", Some("Saved")),
+        "Fix login"
+    );
+    // OMP's own terminal title is never parsed.
+    assert_eq!(
+        omp(None, "π > atlas", Some("API investigation")),
         "API investigation"
     );
+    assert_eq!(omp(Some("  "), "π ! Approval", None), "OMP");
     assert_eq!(
         derived_title(
             StatusSource::Process,
             None,
             "",
-            "/atlas",
             Some("saved"),
             "Claude Code"
         ),
         "saved"
     );
     assert_eq!(
-        derived_title(StatusSource::Process, None, "  ", "/atlas", None, "Shell"),
+        derived_title(StatusSource::Process, None, "  ", None, "Shell"),
         "Shell"
     );
     assert_eq!(
         derived_title(
-            StatusSource::Omp,
+            StatusSource::Process,
+            Some("ignored"),
+            " vim notes ",
             None,
-            "π ! Approval",
-            "/atlas",
-            None,
-            "OMP"
+            "Shell"
         ),
-        "Approval"
+        "vim notes"
     );
-    let spec = Settings::default().tool("omp").unwrap().clone();
-    let mut record = Record {
-        key: None,
-        state: item("a"),
-        spec,
-        tracker: Some(AgentTracker::new()),
-        raw_title: String::new(),
-        conversation_title: Some("Saved title".into()),
-        closing: false,
-        extra: None,
-        job_candidate: None,
-    };
-    record.tracker.as_mut().unwrap().on_title("π ⠋ atlas");
-    record.state.title = record.title();
-    record.state.activity = record.tracker.as_ref().unwrap().activity();
-    let before = record.state.clone();
-    for frame in ["π ⠹ atlas", "π ⠸ atlas", "π ⠼ atlas"] {
-        assert!(!record.tracker.as_mut().unwrap().on_title(frame));
-        assert_eq!(record.title(), before.title);
-        assert_eq!(record.tracker.as_ref().unwrap().activity(), before.activity);
-        assert_eq!(record.state, before);
-    }
 }
 #[test]
 fn pinned_then_first_running_project_order() {
@@ -511,6 +489,19 @@ mod flows {
         let key = host.complete(&id);
         (id, key)
     }
+    /// Status-link lines of OMP's turn states.
+    const WORKING: &str = r#"{"type":"state","state":"working"}"#;
+    const DONE: &str = r#"{"type":"state","state":"done"}"#;
+    const APPROVAL: &str = r#"{"type":"state","state":"needs-you","kind":"approval"}"#;
+    const QUESTION: &str = r#"{"type":"state","state":"needs-you","kind":"question"}"#;
+    /// The `waiting` line for background `bash` jobs (label, start in epoch ms).
+    fn waiting(jobs: &[(&str, u64)]) -> String {
+        let jobs: Vec<_> = jobs
+            .iter()
+            .map(|(label, at)| json!({"label": label, "jobType": "bash", "startedAt": at}))
+            .collect();
+        json!({"type": "state", "state": "waiting", "jobs": jobs}).to_string()
+    }
     fn resume(c: &Conversation) -> Result<String, String> {
         begin_launch(
             c.tool.clone(),
@@ -612,14 +603,16 @@ mod flows {
         let start = snap().revision;
         let a = launch("omp", "/p/atlas");
         let key = host.complete(&a);
-        host.retitle(key, "π > Fix login");
+        host.omp(&a, r#"{"type":"name","name":"Fix login"}"#);
         let revisions: Vec<_> = host.published.borrow().iter().map(|s| s.revision).collect();
         assert_eq!(revisions, (start + 1..=start + 3).collect::<Vec<_>>());
         assert_eq!(snap().revision, start + 3);
         // Reads and no-op updates publish nothing.
         snapshot().unwrap();
         notice_dismiss("notice-404").unwrap();
-        host.retitle(key, "π > Fix login");
+        host.omp(&a, r#"{"type":"name","name":"Fix login"}"#);
+        // OMP's terminal title (spinner frames) never touches the item.
+        host.retitle(key, "π ⠹ Fix login");
         deliver(key, embed::HostEvent::Bell);
         assert_eq!(host.published.borrow().len(), 3);
         assert_eq!(host.last_published().items[0].title, "Fix login");
@@ -648,6 +641,7 @@ mod flows {
                 tool: "omp".into(),
                 cwd: "/p/atlas".into(),
                 args: vec![],
+                linked: true,
             }]
         );
         assert_eq!(
@@ -795,7 +789,7 @@ mod flows {
     }
 
     #[test]
-    fn finishing_a_launch_runs_the_session_and_reads_its_first_title() {
+    fn finishing_a_launch_runs_the_session_with_unknown_status_until_omp_reports() {
         let host = install();
         *host.initial_title.borrow_mut() = "π ⠋ Fix login".into();
         let id = launch("omp", "/p/atlas");
@@ -803,14 +797,20 @@ mod flows {
         let row = item(&id);
         assert_eq!(row.process, Process::Running);
         assert_eq!(row.pid, Some(1000 + key as u32));
-        assert_eq!(row.activity, Activity::Working);
-        assert_eq!(row.title, "Fix login");
+        // OMP's terminal title is no status or title source.
+        assert_eq!(row.activity, Activity::Unknown);
+        assert_eq!(row.title, "OMP");
         assert_eq!(snap().recent_item_ids, vec![id.clone()]);
         // A late result for a row that is no longer starting changes nothing.
         let before = host.published.borrow().len();
         finish_launch(&id, Err("late".into()));
         assert_eq!(item(&id).process, Process::Running);
         assert_eq!(host.published.borrow().len(), before);
+        // Other tools show their terminal title.
+        *host.initial_title.borrow_mut() = "htop".into();
+        let shell = launch("shell", "/p");
+        host.complete(&shell);
+        assert_eq!(item(&shell).title, "htop");
     }
 
     #[test]
@@ -842,6 +842,11 @@ mod flows {
             ])
         );
         assert!(host.calls_of("create").is_empty());
+        // The failed OMP launch's status-link token is invalidated.
+        assert_eq!(
+            *host.links.borrow(),
+            strings(&["link item-2", "unlink item-2"])
+        );
         let notices: Vec<_> = snap()
             .notices
             .into_iter()
@@ -1163,19 +1168,19 @@ mod flows {
     fn unseen_turns_and_questions_mark_unread_and_notify_per_settings() {
         let host = install();
         set(|w| w.settings.notify_turn_finished = true);
-        let (id, key) = running(&host, "omp", "/p/atlas");
-        host.omp_event(key, r#"{"event":"prompt_submit"}"#);
+        let (id, _) = running(&host, "omp", "/p/atlas");
+        host.omp(&id, WORKING);
         assert_eq!(
             (item(&id).activity, item(&id).unread),
             (Activity::Working, false)
         );
-        host.omp_event(key, r#"{"event":"stop"}"#);
+        host.omp(&id, DONE);
         let row = item(&id);
         assert_eq!((row.activity, row.unread), (Activity::YourTurn, true));
-        host.omp_event(key, r#"{"event":"permission_request"}"#);
+        host.omp(&id, APPROVAL);
         assert_eq!(item(&id).attention, Some(Attention::Approval));
         set(|w| w.settings.notify_needs_you = false);
-        host.omp_event(key, r#"{"event":"question_asked"}"#);
+        host.omp(&id, QUESTION);
         assert_eq!(item(&id).attention, Some(Attention::Question));
         assert_eq!(
             *host.notifications.borrow(),
@@ -1187,15 +1192,48 @@ mod flows {
     }
 
     #[test]
+    fn an_idle_report_is_your_turn_without_unread_or_notification() {
+        let host = install();
+        set(|w| w.settings.notify_turn_finished = true);
+        let (id, _) = running(&host, "omp", "/p/atlas");
+        let idle = r#"{"type":"state","state":"idle"}"#;
+        // Startup, an aborted turn, and a question answered by aborting are all silent.
+        host.omp(&id, idle);
+        assert_eq!(
+            (item(&id).activity, item(&id).unread),
+            (Activity::YourTurn, false)
+        );
+        host.omp(&id, WORKING);
+        host.omp(&id, idle);
+        host.omp(&id, QUESTION);
+        host.omp(&id, idle);
+        let row = item(&id);
+        assert_eq!((row.activity, row.unread), (Activity::YourTurn, false));
+        assert_eq!(
+            *host.notifications.borrow(),
+            vec![("OMP".to_string(), "Needs you".to_string())]
+        );
+        // A finished turn after idle is announced, even without passing through working.
+        host.omp(&id, DONE);
+        let row = item(&id);
+        assert_eq!((row.activity, row.unread), (Activity::YourTurn, true));
+        assert_eq!(
+            host.notifications.borrow().last(),
+            Some(&("OMP".to_string(), "Your turn".to_string()))
+        );
+        assert_eq!(host.notifications.borrow().len(), 2);
+    }
+
+    #[test]
     fn finished_turns_stay_silent_by_default_but_still_mark_unread() {
         let host = install();
-        let (id, key) = running(&host, "omp", "/p/atlas");
-        host.omp_event(key, r#"{"event":"prompt_submit"}"#);
-        host.omp_event(key, r#"{"event":"stop"}"#);
+        let (id, _) = running(&host, "omp", "/p/atlas");
+        host.omp(&id, WORKING);
+        host.omp(&id, DONE);
         let row = item(&id);
         assert_eq!((row.activity, row.unread), (Activity::YourTurn, true));
         assert!(host.notifications.borrow().is_empty());
-        host.omp_event(key, r#"{"event":"permission_request"}"#);
+        host.omp(&id, APPROVAL);
         assert_eq!(
             *host.notifications.borrow(),
             vec![("OMP".to_string(), "Needs you".to_string())]
@@ -1203,10 +1241,157 @@ mod flows {
     }
 
     #[test]
+    fn an_agent_on_a_background_job_shows_its_jobs_silently_until_the_turn_settles() {
+        let host = install();
+        set(|w| w.settings.notify_turn_finished = true);
+        host.focused.set(false);
+        let (id, _) = running(&host, "omp", "/p/atlas");
+        host.omp(&id, WORKING);
+        host.omp(
+            &id,
+            &waiting(&[("cargo build", 200), ("bun run test", 100)]),
+        );
+        let row = item(&id);
+        assert_eq!(
+            (row.activity, row.attention, row.unread),
+            (Activity::OnJob, None, false)
+        );
+        assert!(host.notifications.borrow().is_empty(), "entry is silent");
+        let wire = serde_json::to_value(&row).unwrap();
+        assert_eq!(wire["activity"], "on-job");
+        assert_eq!(
+            wire["backgroundJobs"],
+            json!([
+                {"kind": "bash", "label": "bun run test", "startedAtMs": 100},
+                {"kind": "bash", "label": "cargo build", "startedAtMs": 200},
+            ])
+        );
+        // Closing asks first, as for a working agent.
+        assert_eq!(
+            close_reason(&row, StatusSource::Omp, &Settings::default(), false),
+            Some(CloseReason::AgentWorking)
+        );
+
+        // A job ending changes the list, not how long the agent has been waiting.
+        set(|w| w.records[0].state.state_since = 7);
+        host.omp(&id, &waiting(&[("cargo build", 200)]));
+        let row = item(&id);
+        assert_eq!((row.state_since, row.background_jobs.len()), (7, 1));
+        assert_eq!(host.last_published().items[0].background_jobs.len(), 1);
+
+        // Waking or a question leaves the state and drops the jobs.
+        host.omp(&id, WORKING);
+        assert!(item(&id).background_jobs.is_empty());
+        host.omp(&id, &waiting(&[("cargo build", 200)]));
+        host.omp(&id, APPROVAL);
+        let row = item(&id);
+        assert_eq!(
+            (row.activity, row.background_jobs.len()),
+            (Activity::NeedsYou(Attention::Approval), 0)
+        );
+        // Settling: `idle` is a silent your turn, `done` a finished one.
+        host.omp(&id, &waiting(&[("cargo build", 200)]));
+        host.notifications.borrow_mut().clear();
+        host.omp(&id, r#"{"type":"state","state":"idle"}"#);
+        let row = item(&id);
+        assert_eq!((row.activity, row.unread), (Activity::YourTurn, false));
+        assert!(host.notifications.borrow().is_empty());
+        host.omp(&id, &waiting(&[("cargo build", 200)]));
+        host.omp(&id, DONE);
+        let row = item(&id);
+        assert_eq!(
+            (row.activity, row.unread, row.background_jobs.len()),
+            (Activity::YourTurn, true, 0)
+        );
+        assert_eq!(
+            *host.notifications.borrow(),
+            vec![("OMP".to_string(), "Your turn".to_string())]
+        );
+    }
+
+    #[test]
+    fn every_reported_omp_state_maps_to_the_rows_activity() {
+        let host = install();
+        let (id, _) = running(&host, "omp", "/p/atlas");
+        for (line, activity) in [
+            (WORKING, Activity::Working),
+            (APPROVAL, Activity::NeedsYou(Attention::Approval)),
+            (QUESTION, Activity::NeedsYou(Attention::Question)),
+            (
+                r#"{"type":"state","state":"waiting","jobs":[{"label":"bun run test","jobType":"bash","startedAt":1791653576243}]}"#,
+                Activity::OnJob,
+            ),
+            (DONE, Activity::YourTurn),
+            (r#"{"type":"state","state":"error"}"#, Activity::Error),
+            (r#"{"type":"state","state":"idle"}"#, Activity::YourTurn),
+        ] {
+            host.omp(&id, line);
+            let row = item(&id);
+            assert_eq!(
+                (row.activity, row.attention),
+                (activity, activity.attention())
+            );
+        }
+        // Shells and other agents have no status link and stay unknown.
+        let (claude, _) = running(&host, "claude", "/p/atlas");
+        host.omp(&claude, WORKING);
+        assert_eq!(item(&claude).activity, Activity::Unknown);
+        assert_eq!(*host.links.borrow(), strings(&["link item-1"]));
+        assert!(host.prepared.borrow()[0].linked);
+        assert!(!host.prepared.borrow()[1].linked);
+    }
+
+    #[test]
+    fn a_newer_status_connection_supersedes_the_older_one() {
+        let host = install();
+        let (id, _) = running(&host, "omp", "/p/atlas");
+        host.omp_on(&id, 3, WORKING);
+        // A late message from an earlier connection is stale.
+        host.omp_on(&id, 2, DONE);
+        assert_eq!(item(&id).activity, Activity::Working);
+        host.omp_on(&id, 4, APPROVAL);
+        assert_eq!(item(&id).activity, Activity::NeedsYou(Attention::Approval));
+    }
+
+    #[test]
+    fn status_link_tokens_end_with_the_process_or_the_row() {
+        let host = install();
+        let (a, ka) = running(&host, "omp", "/p");
+        host.omp(&a, WORKING);
+        assert!(close(&a, true).is_ok());
+        host.exit(ka, Some(0));
+        assert!(ids().is_empty());
+        // An unclean exit keeps the row, but its token ends with the process.
+        let (b, kb) = running(&host, "omp", "/p");
+        host.exit(kb, Some(1));
+        assert_eq!(item(&b).process, Process::Exited);
+        // Messages that arrive after the exit change nothing.
+        host.omp(&b, WORKING);
+        assert_eq!(item(&b).activity, Activity::Error);
+        close(&b, false).unwrap();
+        // A row closed while starting never launches with a live token.
+        let c = launch("omp", "/p");
+        close(&c, false).unwrap();
+        assert_eq!(
+            *host.links.borrow(),
+            strings(&[
+                "link item-1",
+                "unlink item-1",
+                "unlink item-1",
+                "link item-2",
+                "unlink item-2",
+                "unlink item-2",
+                "link item-3",
+                "unlink item-3",
+            ])
+        );
+    }
+
+    #[test]
     fn a_turn_is_seen_only_while_shown_in_the_focused_window() {
         let host = install();
         set(|w| w.settings.notify_turn_finished = true);
-        let (id, key) = running(&host, "omp", "/p");
+        let (id, _) = running(&host, "omp", "/p");
         let mut sequence = 0;
         let mut show = || {
             sequence += 1;
@@ -1220,8 +1405,8 @@ mod flows {
             .unwrap()
         };
         let turn = || {
-            host.omp_event(key, r#"{"event":"prompt_submit"}"#);
-            host.omp_event(key, r#"{"event":"stop"}"#);
+            host.omp(&id, WORKING);
+            host.omp(&id, DONE);
             item(&id).unread
         };
         assert!(show());
@@ -1244,9 +1429,9 @@ mod flows {
     #[test]
     fn selecting_an_unread_row_marks_it_read() {
         let host = install();
-        let (a, ka) = running(&host, "omp", "/p");
+        let (a, _) = running(&host, "omp", "/p");
         running(&host, "omp", "/p");
-        host.omp_event(ka, r#"{"event":"stop"}"#);
+        host.omp(&a, DONE);
         assert!(item(&a).unread);
         select(&a).unwrap();
         assert!(!item(&a).unread);
@@ -1257,13 +1442,20 @@ mod flows {
     fn a_new_session_unbinds_the_old_conversation_until_it_is_bound() {
         let host = install();
         let id = resume(&saved("omp", "s1", "/p/atlas")).unwrap();
-        let key = host.complete(&id);
-        host.omp_event(key, r#"{"event":"session_start","session_id":"s1"}"#);
+        host.complete(&id);
+        host.omp(
+            &id,
+            r#"{"type":"session","id":"s1","file":"/store/omp/s1.jsonl","cwd":"/p/atlas"}"#,
+        );
         assert_eq!(item(&id).conversation.unwrap().id, "s1");
+        host.omp(&id, r#"{"type":"model","model":"anthropic/opus"}"#);
         let changed = events(&host, "conversations-changed").len();
-        host.omp_event(key, r#"{"event":"session_start","session_id":"s2"}"#);
+        host.omp(
+            &id,
+            r#"{"type":"session","id":"s2","file":null,"cwd":"/p/atlas"}"#,
+        );
         let row = item(&id);
-        assert_eq!((row.conversation, row.model), (None, None));
+        assert_eq!(row.conversation, None);
         assert_eq!(row.title, "OMP");
         assert!(events(&host, "conversations-changed").len() > changed);
         let mut next = saved("omp", "s2", "/p/atlas");
@@ -1274,22 +1466,82 @@ mod flows {
         bind_conversation(&id, "s2", next);
         let row = item(&id);
         assert_eq!(row.conversation.unwrap().path, "/store/omp/s2.jsonl");
+        // The model is OMP's own report, not the session file's.
         assert_eq!(
             (row.title.as_str(), row.model.as_deref()),
-            ("New chat", Some("sonnet"))
+            ("New chat", Some("anthropic/opus"))
         );
-        update_model(&id, "s1", Some("haiku".into()));
-        assert_eq!(item(&id).model.as_deref(), Some("sonnet"));
-        update_model(&id, "s2", Some("haiku".into()));
-        assert_eq!(item(&id).model.as_deref(), Some("haiku"));
-        let before = host.published.borrow().len();
-        update_model(&id, "s2", Some("haiku".into()));
-        assert_eq!(host.published.borrow().len(), before);
-        // A finished turn keeps the bound conversation (its model is refreshed off-main).
-        host.omp_event(key, r#"{"event":"stop"}"#);
+        // A reconnect re-reports the same session: the binding stays.
+        host.omp_on(
+            &id,
+            2,
+            r#"{"type":"session","id":"s2","file":"/store/omp/s2.jsonl","cwd":"/p/atlas"}"#,
+        );
+        host.omp_on(&id, 2, DONE);
         let row = item(&id);
         assert_eq!(row.activity, Activity::YourTurn);
         assert_eq!(row.conversation.unwrap().id, "s2");
+    }
+
+    #[test]
+    fn omp_reports_set_the_rows_model_and_name_directly() {
+        let host = install();
+        let id = resume(&saved("omp", "s1", "/p/atlas")).unwrap();
+        host.complete(&id);
+        // Until OMP reports, a resumed row shows its saved conversation.
+        assert_eq!(
+            (item(&id).title.as_str(), item(&id).model.as_deref()),
+            ("Saved s1", Some("opus"))
+        );
+        host.omp(&id, r#"{"type":"name","name":"QUAKE: Modify ammo"}"#);
+        host.omp(
+            &id,
+            r#"{"type":"model","model":"openai-codex/gpt-6.1-sol"}"#,
+        );
+        let row = item(&id);
+        assert_eq!(
+            (row.title.as_str(), row.model.as_deref()),
+            ("QUAKE: Modify ammo", Some("openai-codex/gpt-6.1-sol"))
+        );
+        assert_eq!(window_title(&snap()), "QUAKE: Modify ammo — atlas");
+        let before = host.published.borrow().len();
+        host.omp(
+            &id,
+            r#"{"type":"model","model":"openai-codex/gpt-6.1-sol"}"#,
+        );
+        assert_eq!(host.published.borrow().len(), before, "unchanged model");
+        host.omp(&id, r#"{"type":"name","name":null}"#);
+        host.omp(&id, r#"{"type":"model","model":null}"#);
+        let row = item(&id);
+        assert_eq!((row.title.as_str(), row.model), ("Saved s1", None));
+    }
+
+    #[test]
+    fn discovery_refreshes_never_replace_a_model_omp_reported() {
+        let host = install();
+        let id = resume(&saved("omp", "s1", "/p/atlas")).unwrap();
+        host.complete(&id);
+        // Before OMP reports, discovery keeps the saved model current.
+        let mut refreshed = saved("omp", "s1", "/p/atlas");
+        refreshed.model = Some("sonnet".into());
+        apply_discovery(vec![refreshed.clone()], vec![]);
+        assert_eq!(item(&id).model.as_deref(), Some("sonnet"));
+
+        host.omp(&id, r#"{"type":"model","model":"anthropic/opus-live"}"#);
+        refreshed.title = "Renamed".into();
+        refreshed.model = Some("stale".into());
+        apply_discovery(vec![refreshed.clone()], vec![]);
+        let row = item(&id);
+        assert_eq!(
+            (row.title.as_str(), row.model.as_deref()),
+            ("Renamed", Some("anthropic/opus-live")),
+            "the title still follows discovery"
+        );
+        // A reported "no model" is live too.
+        host.omp(&id, r#"{"type":"model","model":null}"#);
+        refreshed.updated_at_ms += 1;
+        apply_discovery(vec![refreshed], vec![]);
+        assert_eq!(item(&id).model, None);
     }
 
     #[test]
@@ -1432,11 +1684,13 @@ mod flows {
     #[test]
     fn jump_waiting_visits_questions_first_then_unseen_turns() {
         let host = install();
-        let (a, ka) = running(&host, "omp", "/p");
-        let (b, kb) = running(&host, "omp", "/p");
+        let (a, _) = running(&host, "omp", "/p");
+        let (b, _) = running(&host, "omp", "/p");
         let (c, _) = running(&host, "omp", "/p");
-        host.omp_event(ka, r#"{"event":"stop"}"#);
-        host.omp_event(kb, r#"{"event":"permission_request"}"#);
+        host.omp(&a, DONE);
+        host.omp(&b, APPROVAL);
+        // An agent on a background job is not waiting on the user.
+        host.omp(&c, &waiting(&[("bun run test", 1)]));
         let jump = || {
             dispatch(Action::JumpWaiting).unwrap();
             active().unwrap()

@@ -1,13 +1,14 @@
 //! Native item/project authority. All mutation and embed calls are main-thread-only.
-//! Lifecycle state is lossless; only discrete host notifications have a bounded FIFO.
+//! Lifecycle state is lossless; only bells have a bounded FIFO.
 use crate::{
     config::{Settings, SettingsError, SettingsState, StatusSource, ToolIcon, ToolKind, ToolSpec},
     discovery::{Conversation, ConversationList, StoreError},
     launch,
+    omp_link::{self, Credentials, Delivery, Message},
     platform::{self, MainWindow},
     runtime::{self, ConfigUpdate, Request},
     shortcuts::{Action, Key, Keymap, Mods},
-    status::{Activity, AgentTracker, Attention, OmpEvent},
+    status::{Activity, Attention},
     ui_state::{self, UiStateFile},
 };
 use alacritty_embed::embed::{self, Launch, SessionKey, TerminalState, ViewportRect};
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, VecDeque},
-    ffi::{c_void, OsStr},
+    ffi::c_void,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -64,6 +65,8 @@ pub struct ItemState {
     pub pid: Option<u32>,
     /// Shell items only: the job holding the terminal instead of the shell (board 21, decision 20).
     pub foreground_job: Option<ForegroundJobState>,
+    /// OMP items while `on-job`: the background jobs the agent waits on, oldest first.
+    pub background_jobs: Vec<BackgroundJob>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +74,24 @@ pub struct ForegroundJobState {
     /// The group leader's command name (`cargo`, `ssh`).
     pub command: String,
     pub since_ms: u64,
+}
+/// A background job an OMP agent waits on (decision 22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundJob {
+    /// OMP's job type (`bash`, `task`).
+    pub kind: String,
+    pub label: String,
+    pub started_at_ms: u64,
+}
+impl From<omp_link::Job> for BackgroundJob {
+    fn from(job: omp_link::Job) -> Self {
+        Self {
+            kind: job.job_type,
+            label: job.label,
+            started_at_ms: job.started_at,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -230,13 +251,25 @@ struct Record {
     key: Option<SessionKey>,
     state: ItemState,
     spec: ToolSpec,
-    tracker: Option<AgentTracker>,
+    /// OMP items: what the status link reported.
+    omp: Option<OmpStatus>,
     raw_title: String,
     conversation_title: Option<String>,
     closing: bool,
     extra: Option<Vec<String>>,
     /// A foreground group seen on the last poll but not yet published: (pgid, command, first seen).
     job_candidate: Option<(i32, String, u64)>,
+}
+/// What an OMP item's status link last reported.
+#[derive(Default)]
+struct OmpStatus {
+    /// The newest connection heard from (0: none yet); older connections are stale.
+    connection: u64,
+    session: Option<String>,
+    state: Option<omp_link::State>,
+    name: Option<String>,
+    /// OMP reported the item's model (possibly none); discovery no longer sets it.
+    model_reported: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct AppliedReport {
@@ -252,7 +285,18 @@ trait Host {
     fn publish(&self, state: WorkspaceState);
     fn emit(&self, event: &str, payload: serde_json::Value);
     /// Resolve a launch off the main thread, then run [`finish_launch`] on it.
-    fn prepare(&self, id: String, spec: ToolSpec, cwd: String, args: Vec<String>);
+    fn prepare(
+        &self,
+        id: String,
+        spec: ToolSpec,
+        cwd: String,
+        args: Vec<String>,
+        link: Option<Credentials>,
+    );
+    /// Status-link credentials for an OMP launch of `item`, if the link runs.
+    fn link(&self, item: &str) -> Option<Credentials>;
+    /// Invalidate `item`'s status-link token.
+    fn unlink(&self, item: &str);
     fn create(&self, launch: Launch) -> Result<SessionKey, String>;
     fn state(&self, key: SessionKey) -> Option<TerminalState>;
     fn foreground_job(&self, key: SessionKey) -> Option<embed::ForegroundJob>;
@@ -295,11 +339,30 @@ impl Host for Native {
     fn emit(&self, event: &str, payload: serde_json::Value) {
         let _ = self.app.emit(event, payload);
     }
-    fn prepare(&self, id: String, spec: ToolSpec, cwd: String, args: Vec<String>) {
+    fn prepare(
+        &self,
+        id: String,
+        spec: ToolSpec,
+        cwd: String,
+        args: Vec<String>,
+        link: Option<Credentials>,
+    ) {
         std::thread::spawn(move || {
-            let prepared = launch::prepare(&spec, &cwd, args);
+            // Without its token file the launch still runs, only without status.
+            let link = link.filter(|link| {
+                omp_link::issue(link)
+                    .inspect_err(|e| log::warn!("OMP status link: {e}"))
+                    .is_ok()
+            });
+            let prepared = launch::prepare(&spec, &cwd, args, link.as_ref());
             platform::defer_on_main(Box::new(move || finish_launch(&id, prepared)));
         });
+    }
+    fn link(&self, item: &str) -> Option<Credentials> {
+        omp_link::register(item)
+    }
+    fn unlink(&self, item: &str) {
+        omp_link::forget(item);
     }
     fn create(&self, launch: Launch) -> Result<SessionKey, String> {
         embed::create(launch)
@@ -401,7 +464,6 @@ struct Workspace {
 }
 enum HostUpdate {
     State(TerminalState),
-    Notify(String),
     Bell,
 }
 #[derive(Default)]
@@ -413,7 +475,7 @@ impl HostQueue {
     fn push(&mut self, key: SessionKey, update: HostUpdate) {
         if !matches!(update, HostUpdate::State(_)) {
             if self.discrete == 512 {
-                // Never evict lifecycle state, even during a burst of bells/notifications.
+                // Never evict lifecycle state, even during a burst of bells.
                 let oldest = self
                     .events
                     .iter()
@@ -730,9 +792,15 @@ pub fn apply_discovery(conversations: Vec<Conversation>, errors: Vec<StoreError>
                 }) {
                     record.conversation_title = Some(c.title.clone());
                     let title = record.title();
-                    if record.state.title != title || record.state.model != c.model {
+                    // A model OMP reported itself is live; the saved one may lag behind it.
+                    let model = if record.omp.as_ref().is_some_and(|o| o.model_reported) {
+                        &record.state.model
+                    } else {
+                        &c.model
+                    };
+                    if record.state.title != title || record.state.model != *model {
+                        record.state.model = model.clone();
                         record.state.title = title;
-                        record.state.model.clone_from(&c.model);
                         w.changed = true;
                     }
                 }
@@ -832,11 +900,11 @@ pub fn begin_launch(
         let at = now();
         let id = format!("item-{}", w.next_item);
         w.next_item += 1;
-        let tracker = (spec.status == StatusSource::Omp).then(AgentTracker::new);
+        let omp = spec.status == StatusSource::Omp;
         let mut record = Record {
             key: None,
             spec: spec.clone(),
-            tracker,
+            omp: omp.then(OmpStatus::default),
             raw_title: String::new(),
             conversation_title: conversation.as_ref().map(|c| c.title.clone()),
             closing: false,
@@ -861,6 +929,7 @@ pub fn begin_launch(
                 state_since: at,
                 pid: None,
                 foreground_job: None,
+                background_jobs: Vec::new(),
             },
         };
         record.state.title = record.title();
@@ -873,7 +942,8 @@ pub fn begin_launch(
             w.discovery_revision += 1;
         }
         w.select(&id)?;
-        w.host.prepare(id.clone(), spec, cwd, args);
+        let link = if omp { w.host.link(&id) } else { None };
+        w.host.prepare(id.clone(), spec, cwd, args, link);
         Ok(id)
     })
 }
@@ -897,17 +967,15 @@ fn finish_launch(id: &str, prepared: Result<Launch, String>) {
                 if let Some(state) = w.host.state(key) {
                     record.state.pid = state.pid;
                     record.raw_title = state.title;
-                    if let Some(tracker) = &mut record.tracker {
-                        tracker.on_title(&record.raw_title);
-                        record.state.activity = tracker.activity();
-                        record.state.attention = tracker.activity().attention();
-                    }
                     record.state.title = record.title();
                 }
             }
             Err(failure) => {
                 record.state.process = Process::Failed;
                 record.state.failure = Some(failure.clone());
+                if record.omp.is_some() {
+                    w.host.unlink(id);
+                }
                 w.error_notice(failure);
             }
         }
@@ -1047,7 +1115,7 @@ pub fn close_reason(
     }
     if status == StatusSource::Omp {
         match item.activity {
-            Activity::Working => return Some(CloseReason::AgentWorking),
+            Activity::Working | Activity::OnJob => return Some(CloseReason::AgentWorking),
             Activity::NeedsYou(_) => return Some(CloseReason::AgentNeedsYou),
             _ => {}
         }
@@ -1254,7 +1322,6 @@ pub fn focus(id: &str, epoch: u64, sequence: u64) -> Result<bool, String> {
 fn host_event(key: SessionKey, event: embed::HostEvent<'_>) {
     let update = match event {
         embed::HostEvent::State(s) => HostUpdate::State(s.clone()),
-        embed::HostEvent::Notify(s) => HostUpdate::Notify(s.into()),
         embed::HostEvent::Bell => HostUpdate::Bell,
     };
     HOST_EVENTS.with(|events| events.borrow_mut().push(key, update));
@@ -1312,8 +1379,7 @@ type Observed = (Process, Activity, Option<Attention>, Option<u32>, bool);
 pub fn bind_conversation(item: &str, session: &str, c: Conversation) {
     let _ = with(|w| {
         let Some(r) = w.records.iter_mut().find(|r| {
-            r.state.id == item
-                && r.tracker.as_ref().and_then(AgentTracker::session_id) == Some(session)
+            r.state.id == item && r.omp.as_ref().and_then(|o| o.session.as_deref()) == Some(session)
         }) else {
             return Ok(());
         };
@@ -1324,28 +1390,24 @@ pub fn bind_conversation(item: &str, session: &str, c: Conversation) {
         });
         w.discovery_revision += 1;
         r.conversation_title = Some(c.title);
-        r.state.model = c.model;
         r.state.title = r.title();
         w.changed = true;
         Ok(())
     });
 }
-pub fn update_model(item: &str, session: &str, model: Option<String>) {
-    let _ = with(|w| {
-        if let Some(r) = w.records.iter_mut().find(|r| {
-            r.state.id == item
-                && r.state
-                    .conversation
-                    .as_ref()
-                    .is_some_and(|c| c.id == session)
-        }) {
-            if r.state.model != model {
-                r.state.model = model;
-                w.changed = true;
-            }
-        }
-        Ok(())
-    });
+/// A message from an OMP item's status link (main thread).
+pub fn omp_link(delivery: Delivery) {
+    let _ = with(|w| w.apply_link(delivery));
+}
+/// Native mapping of the link's turn state, the only place that interprets it.
+fn link_activity(state: &omp_link::State) -> Activity {
+    match state {
+        omp_link::State::Working => Activity::Working,
+        omp_link::State::Waiting { .. } => Activity::OnJob,
+        omp_link::State::NeedsYou { kind } => Activity::NeedsYou(*kind),
+        omp_link::State::Done | omp_link::State::Idle => Activity::YourTurn,
+        omp_link::State::Error => Activity::Error,
+    }
 }
 pub fn key_action(key: &embed::AppKey) -> Option<Action> {
     let named = key.named.map(|named| match named {
@@ -1511,9 +1573,8 @@ impl Record {
     fn title(&self) -> String {
         derived_title(
             self.spec.status,
-            self.tracker.as_ref().and_then(AgentTracker::label),
+            self.omp.as_ref().and_then(|o| o.name.as_deref()),
             &self.raw_title,
-            &self.state.cwd,
             self.conversation_title.as_deref(),
             &self.spec.label,
         )
@@ -1529,11 +1590,8 @@ impl Record {
     }
     /// Returns whether the title source changed.
     fn apply_terminal_state(&mut self, state: TerminalState, discovery_revision: &mut u64) -> bool {
-        let title_source_changed = if let Some(tracker) = &mut self.tracker {
-            tracker.on_title(&state.title)
-        } else {
-            self.raw_title != state.title
-        };
+        // OMP items take their title from the status link, never from the terminal.
+        let title_source_changed = self.omp.is_none() && self.raw_title != state.title;
         self.raw_title = state.title;
         self.state.pid = state.pid;
         if !state.running && self.state.process == Process::Running {
@@ -1545,26 +1603,7 @@ impl Record {
         }
         title_source_changed
     }
-    /// OMP status signals; returns whether a new session dropped the bound conversation.
-    fn apply_notification(&mut self, payload: &str, discovery_revision: &mut u64) -> bool {
-        let Some(tracker) = &mut self.tracker else {
-            return false;
-        };
-        let Some(event) = crate::status::parse_osc777(payload) else {
-            return false;
-        };
-        tracker.on_event(&event);
-        let reset = match &event {
-            OmpEvent::SessionStart { session_id, .. } => {
-                self.start_session(session_id, discovery_revision)
-            }
-            _ => false,
-        };
-        if matches!(event, OmpEvent::Stop | OmpEvent::StopFailure { .. }) {
-            self.request_model();
-        }
-        reset
-    }
+    /// OMP is in session `session_id` now; returns whether that dropped the bound conversation.
     fn start_session(&mut self, session_id: &str, discovery_revision: &mut u64) -> bool {
         let reset = self
             .state
@@ -1573,7 +1612,6 @@ impl Record {
             .is_some_and(|c| c.id != session_id);
         if reset {
             self.state.conversation = None;
-            self.state.model = None;
             self.conversation_title = None;
             *discovery_revision += 1;
         }
@@ -1584,15 +1622,6 @@ impl Record {
         ));
         reset
     }
-    fn request_model(&self) {
-        if let Some(c) = &self.state.conversation {
-            let _ = runtime::send(Request::Model(
-                self.state.id.clone(),
-                c.id.clone(),
-                c.path.clone(),
-            ));
-        }
-    }
     /// Returns whether the displayed title changed.
     fn refresh_title(&mut self) -> bool {
         let title = self.title();
@@ -1602,6 +1631,15 @@ impl Record {
         self.state.title = title;
         true
     }
+    /// Your turn without a finished turn to announce: OMP reported `idle` (an aborted turn, a
+    /// new or switched session). It neither marks the item unread nor notifies.
+    fn quiet(&self) -> bool {
+        self.derived_activity() == Activity::YourTurn
+            && matches!(
+                self.omp.as_ref().and_then(|o| o.state.as_ref()),
+                Some(omp_link::State::Idle)
+            )
+    }
     fn derived_activity(&self) -> Activity {
         if self.state.process == Process::Exited
             && self.state.kind == ToolKind::Agent
@@ -1609,9 +1647,10 @@ impl Record {
         {
             Activity::Error
         } else {
-            self.tracker
+            self.omp
                 .as_ref()
-                .map_or(Activity::Unknown, AgentTracker::activity)
+                .and_then(|o| o.state.as_ref())
+                .map_or(Activity::Unknown, link_activity)
         }
     }
     /// For an exited item that should leave the sidebar, whether its agent session ended.
@@ -1625,33 +1664,25 @@ impl Record {
         (self.closing || clean && (agent || remove_on_clean_exit)).then_some(ended)
     }
 }
+/// An item's title. OMP items use their session name; other items their terminal title. Both
+/// fall back to the resumed conversation's title, then the tool's label.
 pub fn derived_title(
     status: StatusSource,
-    omp_label: Option<&str>,
+    omp_name: Option<&str>,
     raw: &str,
-    cwd: &str,
     conversation: Option<&str>,
     label: &str,
 ) -> String {
-    let parsed = (status == StatusSource::Omp && omp_label.is_none())
-        .then(|| crate::status::parse_omp_title(raw))
-        .flatten();
     let title = if status == StatusSource::Omp {
-        omp_label
-            .or_else(|| parsed.as_ref().map(|(_, label)| label.as_str()))
-            .unwrap_or(raw)
-            .trim()
+        omp_name.unwrap_or_default()
     } else {
-        raw.trim()
-    };
-    let basename = Path::new(cwd)
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or(cwd);
-    if title.is_empty() || status == StatusSource::Omp && title == basename {
+        raw
+    }
+    .trim();
+    if title.is_empty() {
         conversation
             .filter(|t| !t.trim().is_empty())
-            .unwrap_or(if title.is_empty() { label } else { title })
+            .unwrap_or(label)
             .into()
     } else {
         title.into()
@@ -1770,25 +1801,105 @@ impl Workspace {
         let presented = self.is_presented(index);
         let record = &mut self.records[index];
         let before = record.observed();
-        let (title_source_changed, metadata_changed) = match event {
-            HostUpdate::State(state) => (
-                record.apply_terminal_state(state, &mut self.discovery_revision),
-                false,
-            ),
-            HostUpdate::Notify(payload) => {
-                let reset = record.apply_notification(&payload, &mut self.discovery_revision);
-                (reset, reset)
+        let was_quiet = record.quiet();
+        let title_source_changed = match event {
+            HostUpdate::State(state) => {
+                record.apply_terminal_state(state, &mut self.discovery_revision)
             }
-            HostUpdate::Bell => (false, false),
+            HostUpdate::Bell => false,
         };
         let title_changed = title_source_changed && record.refresh_title();
+        if record.omp.is_some() && record.state.process != before.0 {
+            // The process ended: its token must not report for it any more.
+            self.host.unlink(&record.state.id);
+        }
+        self.settle(index, presented, (before, was_quiet), title_changed)
+    }
+    /// Applies a status-link message to its running OMP item. Messages from a connection older
+    /// than the newest one heard from were superseded and are dropped.
+    fn apply_link(&mut self, delivery: Delivery) -> Result<(), String> {
+        let Some(index) = self
+            .records
+            .iter()
+            .position(|r| r.state.id == delivery.item && r.state.process == Process::Running)
+        else {
+            return Ok(());
+        };
+        let presented = self.is_presented(index);
+        let record = &mut self.records[index];
+        let before = record.observed();
+        let was_quiet = record.quiet();
+        let Some(link) = record.omp.as_mut() else {
+            return Ok(());
+        };
+        if delivery.connection < link.connection {
+            return Ok(());
+        }
+        link.connection = delivery.connection;
+        let changed = match delivery.message {
+            Message::Session { id } => {
+                if link.session.as_deref() == Some(id.as_str()) {
+                    false
+                } else {
+                    link.session = Some(id.clone());
+                    let reset = record.start_session(&id, &mut self.discovery_revision);
+                    if reset {
+                        record.refresh_title();
+                    }
+                    reset
+                }
+            }
+            Message::State(mut state) => {
+                // The job list moves to the item; the link keeps only the state.
+                let jobs = match &mut state {
+                    omp_link::State::Waiting { jobs } => std::mem::take(jobs),
+                    _ => Vec::new(),
+                };
+                let jobs: Vec<BackgroundJob> = jobs.into_iter().map(Into::into).collect();
+                let changed = record.state.background_jobs != jobs;
+                record.state.background_jobs = jobs;
+                link.state = Some(state);
+                changed
+            }
+            Message::Model { model } => {
+                link.model_reported = true;
+                let changed = record.state.model != model;
+                record.state.model = model;
+                changed
+            }
+            Message::Name { name } => {
+                link.name = name;
+                record.refresh_title()
+            }
+        };
+        self.settle(index, presented, (before, was_quiet), changed)
+    }
+    /// Re-derives an updated item's activity: unread and desktop notification for an
+    /// unpresented item, republication, and removal of a finished row. `before` is the item's
+    /// [`Record::observed`] and [`Record::quiet`] state ahead of the update.
+    fn settle(
+        &mut self,
+        index: usize,
+        presented: bool,
+        (before, was_quiet): (Observed, bool),
+        changed: bool,
+    ) -> Result<(), String> {
+        let record = &mut self.records[index];
         let activity = record.derived_activity();
-        if activity != record.state.activity || record.state.process != before.0 {
+        let quiet = record.quiet();
+        // A quiet your-turn is announced once it becomes a finished turn.
+        let entered = activity != before.1 || was_quiet && !quiet;
+        if entered || record.state.process != before.0 {
             record.state.state_since = now();
         }
         record.state.activity = activity;
         record.state.attention = activity.attention();
-        if activity != before.1 && !presented {
+        // Jobs show only while the agent waits on them (e.g. not on an exited row).
+        if activity != Activity::OnJob && !record.state.background_jobs.is_empty() {
+            record.state.background_jobs.clear();
+            self.changed = true;
+        }
+        if entered && !quiet && !presented {
             if activity == Activity::YourTurn {
                 record.state.unread = true;
             }
@@ -1796,7 +1907,7 @@ impl Workspace {
                 self.host.notify(&record.state.title, body);
             }
         }
-        self.changed |= metadata_changed || title_changed || before != record.observed();
+        self.changed |= changed || before != record.observed();
         if let Some(ended) = record.exit_removal(self.settings.remove_on_clean_exit) {
             self.remove(index, ended)?;
         }
@@ -1925,7 +2036,9 @@ impl Workspace {
         if self.records[index].state.conversation.is_some() {
             self.discovery_revision += 1;
         }
-        self.records.remove(index);
+        if self.records.remove(index).omp.is_some() {
+            self.host.unlink(&id);
+        }
         let _ = runtime::send(Request::Forget(id.clone()));
         self.recent.retain(|i| i != &id);
         self.project_order

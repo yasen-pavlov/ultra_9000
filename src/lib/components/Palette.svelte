@@ -404,6 +404,8 @@
     parts.push(workspace.toolLabel(item.tool));
     if (stateText !== null) parts.push(stateText);
     if (item.model !== null) parts.push({ model: item.model, tool: item.tool });
+    // Board 28: an agent on job lists its job labels, oldest first.
+    if (item.activity === "on-job") parts.push(item.backgroundJobs.map((job) => job.label).join(", "));
     if (item.id === workspace.previousItemId) parts.push("previous item");
     return parts;
   }
@@ -643,7 +645,9 @@
                                 >{part.text}</mark
                               >{:else}{part.text}{/if}{/each}<span class="dis">{dis}</span></span
                         >
-                        <span class="s">{@render subLine(sub)}</span>
+                        <span class="s" title={view.pillClass === "wait" ? view.tooltip : undefined}
+                          >{@render subLine(sub)}</span
+                        >
                       </span>
                       {#if view.pill !== ""}<span class="pill {view.pillClass}">{view.pill}</span>{/if}
                       <span class="act"

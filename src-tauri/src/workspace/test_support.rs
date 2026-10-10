@@ -8,6 +8,8 @@ pub(crate) struct Prepared {
     pub(crate) tool: String,
     pub(crate) cwd: String,
     pub(crate) args: Vec<String>,
+    /// The launch got status-link credentials.
+    pub(crate) linked: bool,
 }
 struct Session {
     state: TerminalState,
@@ -25,6 +27,8 @@ pub(crate) struct FakeHost {
     pub(crate) calls: RefCell<Vec<String>>,
     pub(crate) notifications: RefCell<Vec<(String, String)>>,
     pub(crate) pin_probes: RefCell<Vec<Vec<PathBuf>>>,
+    /// Status-link token effects in order: `link item-1`, `unlink item-1`.
+    pub(crate) links: RefCell<Vec<String>>,
     /// Next `create` fails with this message.
     pub(crate) create_error: RefCell<Option<String>>,
     /// `reload_config` fails with this message.
@@ -45,6 +49,7 @@ pub(crate) fn install() -> Rc<FakeHost> {
         prepared: RefCell::default(),
         calls: RefCell::default(),
         notifications: RefCell::default(),
+        links: RefCell::default(),
         pin_probes: RefCell::default(),
         create_error: RefCell::default(),
         reload_error: RefCell::default(),
@@ -113,10 +118,18 @@ impl FakeHost {
         let state = self.update(key, |s| s.title = title.into());
         deliver(key, embed::HostEvent::State(&state));
     }
-    /// OMP emits an OSC 777 event (JSON body) on the session.
-    pub(crate) fn omp_event(&self, key: SessionKey, json: &str) {
-        let payload = format!("notify;warp://cli-agent;{json}");
-        deliver(key, embed::HostEvent::Notify(&payload));
+    /// The item's OMP sends one status-link line (`json`) on connection 1.
+    pub(crate) fn omp(&self, id: &str, json: &str) {
+        self.omp_on(id, 1, json);
+    }
+    /// The item's OMP sends one status-link line on the numbered connection.
+    pub(crate) fn omp_on(&self, id: &str, connection: u64, json: &str) {
+        let message = omp_link::parse(json.as_bytes()).expect("not a status-link message");
+        omp_link(Delivery {
+            item: id.into(),
+            connection,
+            message,
+        });
     }
     /// A process group (`pgid`, `name`) holds the session's terminal; `None` is the prompt.
     pub(crate) fn set_job(&self, key: SessionKey, job: Option<(i32, &str)>) {
@@ -166,13 +179,33 @@ impl Host for FakeHost {
     fn emit(&self, event: &str, payload: serde_json::Value) {
         self.events.borrow_mut().push((event.into(), payload));
     }
-    fn prepare(&self, id: String, spec: ToolSpec, cwd: String, args: Vec<String>) {
+    fn prepare(
+        &self,
+        id: String,
+        spec: ToolSpec,
+        cwd: String,
+        args: Vec<String>,
+        link: Option<Credentials>,
+    ) {
         self.prepared.borrow_mut().push(Prepared {
             id,
             tool: spec.id,
             cwd,
             args,
+            linked: link.is_some(),
         });
+    }
+    fn link(&self, item: &str) -> Option<Credentials> {
+        self.links.borrow_mut().push(format!("link {item}"));
+        Some(Credentials {
+            socket: "/run/ultra-9000/omp.sock".into(),
+            extension: "/run/ultra-9000/ultra9000-status-7.ts".into(),
+            token_file: format!("/run/ultra-9000/omp-token-{item}"),
+            token: format!("token-{item}"),
+        })
+    }
+    fn unlink(&self, item: &str) {
+        self.links.borrow_mut().push(format!("unlink {item}"));
     }
     fn create(&self, launch: Launch) -> Result<SessionKey, String> {
         if let Some(error) = self.create_error.borrow_mut().take() {

@@ -47,10 +47,11 @@ fn slot_header_stub_and_model() {
         .starts_with("Untitled"));
 }
 #[test]
-fn latest_model_tail() {
+fn conversation_model_is_the_latest_default_model_in_the_tail() {
     let path = std::env::temp_dir().join(format!("u9k-model-{}.jsonl", std::process::id()));
-    let data=format!("{{\"type\":\"model_change\",\"model\":\"initial\"}}\n{}\n{{\"type\":\"model_change\",\"model\":\"final\"}}\n{{\"type\":\"model_change\",\"role\":\"fallback\",\"model\":\"ignored\"}}\n","x".repeat(80*1024));
+    let data=format!("{{\"type\":\"session\",\"id\":\"id\",\"cwd\":\"/synthetic/cwd\",\"title\":\"t\"}}\n{{\"type\":\"model_change\",\"model\":\"initial\"}}\n{}\n{{\"type\":\"model_change\",\"model\":\"final\"}}\n{{\"type\":\"model_change\",\"role\":\"fallback\",\"model\":\"ignored\"}}\n","x".repeat(80*1024));
     fs::write(&path, data).unwrap();
-    assert_eq!(omp_latest_model(&path).as_deref(), Some("final"));
+    let c = read("omp", &path, 0).unwrap().unwrap();
+    assert_eq!(c.model.as_deref(), Some("final"));
     fs::remove_file(path).unwrap();
 }

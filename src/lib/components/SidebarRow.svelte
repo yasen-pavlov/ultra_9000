@@ -61,13 +61,13 @@
     {#if !compact}
       <!-- Board 21 (2026-10-04): line 2 is tool · model · age with the state pill at its end. -->
       <span class="sl">
-        <span class="s" class:err={view.subIsError} title={view.sub}>{view.sub}</span>
+        <span class="s" class:err={view.subIsError} title={view.tooltip}>{view.sub}</span>
         {#if view.pill !== ""}<span class="pill {view.pillClass}">{view.pill}</span>{/if}
       </span>
     {/if}
   </span>
   {#if compact && view.pill !== ""}
-    <span class="pill {view.pillClass}">{view.pill}</span>
+    <span class="pill {view.pillClass}" title={view.pillClass === "wait" ? view.tooltip : undefined}>{view.pill}</span>
   {/if}
   <button type="button" class="iconbtn x" tabindex="-1" aria-label="Close {view.title}" title="Close" onclick={onclose}>
     <Icon name="close" small />

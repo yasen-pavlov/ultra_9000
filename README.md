@@ -25,7 +25,7 @@ Ultra 9000 is a Tauri + Svelte desktop app that wraps **actual native Alacritty 
 - **Projects → live items.** Every sidebar row is one live process: an agent (OMP, Claude Code, Codex, pi, or any tool configured in `[tools.*]`), a shell or Neovim, grouped by git project.
 - **Native terminals.** Vendored Alacritty drawn as AppKit views on macOS and Wayland subsurfaces on Linux, above only the terminal rectangle.
 - **Resume saved conversations** from OMP, Claude Code, Codex and pi, discovered read-only from each tool's own session store.
-- **Agent status from the agent's own signals.** Working, needs you and your turn come from OMP's terminal title and OSC 777 events, never guessed from output.
+- **Agent status from the agent itself.** Working, needs you and your turn come from Ultra 9000's launch-scoped OMP extension, which reports OMP's own events over a local socket; status is never guessed from output.
 - **Inline images:** Sixel, iTerm2 OSC 1337 inline files and the kitty graphics protocol, including Unicode placeholders (OMP's image thumbnails).
 - **Git-friendly settings.** Plain TOML files are the source of truth, hot-reloaded; the settings sheet edits them in place and keeps comments.
 - **Keyboard-first**, with first-class mouse use; shortcuts match physical keys, so they work under any layout.

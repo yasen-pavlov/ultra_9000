@@ -8,6 +8,7 @@ use super::{
 };
 use super::{find_executable, validate_directory};
 use crate::config::{Settings, StatusSource};
+use crate::omp_link::Credentials;
 use std::path::Path;
 
 fn scratch(name: &str) -> PathBuf {
@@ -133,48 +134,73 @@ fn path_check_suggests_closest_enterable_sibling() {
     fs::remove_dir_all(dir).unwrap();
 }
 #[test]
-fn prepared_environment_adds_omp_status_protocol_and_respects_tool_env() {
+fn omp_launches_load_the_status_extension_with_their_own_link() {
     let dir = scratch("prepare");
     let cwd = dir.to_str().unwrap();
     let mut tool = Settings::default().tool("shell").unwrap().clone();
     assert_eq!(tool.command, None);
     tool.env = vec![
         ("FOO".into(), "bar".into()),
-        ("WARP_CLI_AGENT_PROTOCOL_VERSION".into(), "9".into()),
+        ("ULTRA9000_OMP_TOKEN_FILE".into(), "/tmp/configured".into()),
+        ("ULTRA9000_OMP_LINK".into(), "/tmp/configured.sock".into()),
     ];
+    let link = Credentials {
+        socket: "/run/user/1000/ultra-9000/omp-7.sock".into(),
+        extension: "/run/user/1000/ultra-9000/ultra9000-status-7.ts".into(),
+        token_file: "/run/user/1000/ultra-9000/omp-token-5e1f".into(),
+        token: "0123456789abcdef0123456789abcdef".into(),
+    };
 
-    let plain = prepare(&tool, &format!("{cwd}/"), Vec::new()).unwrap();
+    // Tools without OMP status never get the extension or the link, even if offered one.
+    let plain = prepare(&tool, &format!("{cwd}/"), Vec::new(), Some(&link)).unwrap();
     assert!(plain.command.is_none(), "no argv starts the login shell");
     assert_eq!(plain.working_directory, dir);
     assert_eq!(pairs(&plain.env), pairs(&tool.env));
 
     tool.status = StatusSource::Omp;
-    let omp = prepare(&tool, cwd, vec!["+3".into(), "notes.md".into()]).unwrap();
+    let omp = prepare(
+        &tool,
+        cwd,
+        vec!["+3".into(), "notes.md".into()],
+        Some(&link),
+    )
+    .unwrap();
     let (_, args) = omp.command.unwrap();
-    assert_eq!(args, ["+3", "notes.md"]);
+    assert_eq!(
+        args,
+        [
+            "-e",
+            "/run/user/1000/ultra-9000/ultra9000-status-7.ts",
+            "+3",
+            "notes.md"
+        ]
+    );
+    // The token itself never enters the environment OMP's subprocesses inherit.
     assert_eq!(
         pairs(&omp.env),
         [
             ("FOO", "bar"),
-            ("WARP_CLI_AGENT_PROTOCOL_VERSION", "1"),
+            ("ULTRA9000_OMP_LINK", "/run/user/1000/ultra-9000/omp-7.sock"),
+            (
+                "ULTRA9000_OMP_TOKEN_FILE",
+                "/run/user/1000/ultra-9000/omp-token-5e1f"
+            ),
             ("PI_NOTIFICATIONS", "off"),
         ]
     );
 
+    // Without a running link OMP starts plain, and configured link values never apply.
     tool.env.push(("PI_NOTIFICATIONS".into(), "on".into()));
-    let own = prepare(&tool, cwd, Vec::new()).unwrap();
+    let unlinked = prepare(&tool, cwd, Vec::new(), None).unwrap();
+    assert!(unlinked.command.is_none());
     assert_eq!(
-        pairs(&own.env),
-        [
-            ("FOO", "bar"),
-            ("PI_NOTIFICATIONS", "on"),
-            ("WARP_CLI_AGENT_PROTOCOL_VERSION", "1"),
-        ]
+        pairs(&unlinked.env),
+        [("FOO", "bar"), ("PI_NOTIFICATIONS", "on")]
     );
 
     let missing = dir.join("missing");
     assert_eq!(
-        prepare(&tool, missing.to_str().unwrap(), Vec::new()).unwrap_err(),
+        prepare(&tool, missing.to_str().unwrap(), Vec::new(), Some(&link)).unwrap_err(),
         format!("{} does not exist.", missing.display())
     );
     fs::remove_dir_all(dir).unwrap();

@@ -142,7 +142,6 @@ pub struct Launch {
 /// embed: Main-thread host callback, delivered outside all session borrows.
 pub enum HostEvent<'a> {
     State(&'a TerminalState),
-    Notify(&'a str),
     Bell,
 }
 
@@ -1004,11 +1003,9 @@ fn pump(key: SessionKey) {
             (embedder.listener)(key, HostEvent::State(&state));
         }
         for event in events {
-            // A callback may remove the session; do not deliver stale queued payloads.
+            // A callback may remove the session; do not deliver stale queued events.
             if slot.with_host_ref(|_| ()).is_none() { break; }
             match event {
-                window_context::PendingHostEvent::Notify(text) =>
-                    (embedder.listener)(key, HostEvent::Notify(&text)),
                 window_context::PendingHostEvent::Bell =>
                     (embedder.listener)(key, HostEvent::Bell),
             }

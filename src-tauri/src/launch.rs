@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::{StatusSource, ToolSpec};
+use crate::omp_link::{self, Credentials};
 use alacritty_embed::embed::{self, Launch};
 use serde::Serialize;
 
@@ -34,9 +35,20 @@ const PROBE_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// PATH of the user's interactive login shell, once successfully probed.
 static LOGIN_PATH: Mutex<Option<String>> = Mutex::new(None);
-/// Resolve a configured tool off the main thread.
-pub fn prepare(tool: &ToolSpec, cwd: &str, args: Vec<String>) -> Result<Launch, String> {
+/// Resolve a configured tool off the main thread. An OMP launch with `link` loads Ultra 9000's
+/// status extension and gets the link's socket and its item's token.
+pub fn prepare(
+    tool: &ToolSpec,
+    cwd: &str,
+    mut args: Vec<String>,
+    link: Option<&Credentials>,
+) -> Result<Launch, String> {
     let directory = validate_directory(cwd)?;
+    let omp = tool.status == StatusSource::Omp;
+    let link = link.filter(|_| omp);
+    if let Some(link) = link {
+        args.splice(0..0, ["-e".to_owned(), link.extension.clone()]);
+    }
     let mut launch = if let Some(name) = &tool.command {
         tool_launch(name, &tool.label, directory, args)?
     } else {
@@ -52,13 +64,21 @@ pub fn prepare(tool: &ToolSpec, cwd: &str, args: Vec<String>) -> Result<Launch, 
         }
     };
     launch.env.clone_from(&tool.env);
-    if tool.status == StatusSource::Omp {
+    if omp {
+        // The link variables belong to this launch only; configured values never apply. The
+        // token itself stays out of the environment, which OMP's subprocesses inherit: the
+        // extension reads it once from the file and deletes the file.
         launch
             .env
-            .retain(|(key, _)| key != "WARP_CLI_AGENT_PROTOCOL_VERSION");
-        launch
-            .env
-            .push(("WARP_CLI_AGENT_PROTOCOL_VERSION".into(), "1".into()));
+            .retain(|(key, _)| key != omp_link::LINK_ENV && key != omp_link::TOKEN_FILE_ENV);
+        if let Some(link) = link {
+            launch
+                .env
+                .push((omp_link::LINK_ENV.into(), link.socket.clone()));
+            launch
+                .env
+                .push((omp_link::TOKEN_FILE_ENV.into(), link.token_file.clone()));
+        }
         // Ultra 9000 owns attention notifications (notify.* settings) for the agents it
         // monitors; OMP's own ask/completion toasts would duplicate them. A tool-level
         // `env` entry for PI_NOTIFICATIONS still wins.

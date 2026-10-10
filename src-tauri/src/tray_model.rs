@@ -149,6 +149,7 @@ fn entry(item: &ItemState, glyph: &str, project: &str, duplicate_title: bool) ->
         Activity::NeedsYou(_) => (Some('!'), "needs you"),
         Activity::YourTurn => (item.unread.then_some('●'), "your turn"),
         Activity::Working => (Some('…'), "working"),
+        Activity::OnJob => (Some('…'), "on job"),
         _ => (None, "running"),
     };
     let lead = marker.map_or_else(|| format!("{glyph}  "), |m| format!("{glyph} {m}  "));

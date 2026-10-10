@@ -54,7 +54,6 @@ pub enum Request {
     Reveal(mpsc::Sender<Result<(), String>>),
     Save(UiStateFile, mpsc::Sender<Result<(), String>>),
     Bind(String, String, String),
-    Model(String, String, String),
     Forget(String),
     Report(SettingsError),
 }
@@ -106,7 +105,6 @@ enum Effect {
     SettingsState(SettingsState),
     Discovery(Vec<Conversation>, Vec<StoreError>),
     Bind(String, String, Conversation),
-    Model(String, String, Option<String>),
     /// Resolve these tools on the login-shell PATH (off the worker, which must stay responsive).
     Probe(Vec<config::ToolSpec>),
 }
@@ -124,7 +122,6 @@ impl Effect {
                 workspace::apply_discovery(conversations, errors)
             }
             Self::Bind(item, session, c) => workspace::bind_conversation(&item, &session, c),
-            Self::Model(item, session, model) => workspace::update_model(&item, &session, model),
             Self::Probe(_) => unreachable!("probes run on their own thread"),
         }
     }
@@ -300,10 +297,6 @@ impl<P: FnMut(Effect)> Worker<P> {
             }
             Request::Forget(item) => {
                 self.pending_bindings.retain(|(id, _, _)| id != &item);
-            }
-            Request::Model(item, session, path) => {
-                let model = discovery::omp_latest_model(Path::new(&path));
-                (self.post)(Effect::Model(item, session, model));
             }
             Request::Report(error) => {
                 self.store.report_error(error);

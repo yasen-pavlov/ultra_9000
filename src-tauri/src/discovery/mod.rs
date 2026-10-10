@@ -1,5 +1,5 @@
 //! Read-only discovery: Index::{new,refresh,conversations,errors,omp_by_session_id},
-//! project_root, omp_latest_model and store_dirs. Disk calls must run off the UI thread.
+//! project_root and store_dirs. Disk calls must run off the UI thread.
 //! Conversation is internal metadata; ConversationEntry is the exact wire DTO.
 mod claude;
 mod codex;
@@ -7,12 +7,9 @@ mod metadata;
 mod omp;
 mod pi;
 mod project;
+use crate::config::{StoreKind, ToolSpec};
 use metadata::Record;
 pub use project::project_root;
-pub fn omp_latest_model(path: &std::path::Path) -> Option<String> {
-    omp::omp_latest_model(path)
-}
-use crate::config::{StoreKind, ToolSpec};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},

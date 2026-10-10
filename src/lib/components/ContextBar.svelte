@@ -7,7 +7,7 @@
   import { clock } from "../clock.svelte";
   import { run, uiErrors } from "../errors.svelte";
   import { modelShort } from "../format";
-  import { itemView } from "../items";
+  import { itemView, onJobNote } from "../items";
   import { itemClose, itemResume, noticeDismiss, type ShortcutAction } from "../native";
   import { workspace } from "../workspace.svelte";
   import Icon from "./Icon.svelte";
@@ -139,9 +139,13 @@
       <b class="txt">{workspace.projectName(active.projectId)}</b><span class="txt sep">/</span>
       <b class="txt title">{activeView.title}{workspace.disambiguation.get(active.id) ?? ""}</b>
       <span class="pill {activeView.pillClass === '' ? 'mute' : activeView.pillClass}"
-        >{activeView.pillClass === "job" ? activeView.pill : activeView.stateText}</span
+        >{activeView.pillClass === "job" || activeView.pillClass === "wait"
+          ? activeView.pill
+          : activeView.stateText}</span
       >
-      {#if active.model !== null}
+      {#if active.activity === "on-job"}
+        <span class="jobs" title={activeView.tooltip}>{onJobNote(active)}</span>
+      {:else if active.model !== null}
         <span class="txt model"><ProviderMark model={active.model} tool={active.tool} inline />{active.model}</span>
       {/if}
     {/if}
@@ -210,6 +214,11 @@
     text-overflow: ellipsis;
     min-width: 0;
     display: inline-block;
+  }
+  .jobs {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   .notice,
   .cerr {
