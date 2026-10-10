@@ -134,4 +134,4 @@ No daemon preserves processes after full quit, crash, logout or reboot. Cleanup 
 
 ## Repository boundary
 
-Machine-specific agent configuration, credentials, local session data, screenshots, transcripts, evaluation archives, dependency caches, build artifacts and `docs/local/` are deliberately excluded. A new clone is sufficient for app development; no files from the original workstation's home directory are required. Version fields stay at the `0.0.0` placeholder: release builds stamp the tag's version (`docs/releasing.md`).
+Machine-specific agent configuration, credentials, local session data, verification screenshots, transcripts, evaluation archives, dependency caches, build artifacts and `docs/local/` are deliberately excluded. A new clone is sufficient for app development; no files from the original workstation's home directory are required. Version fields stay at the `0.0.0` placeholder: release builds stamp the tag's version (`docs/releasing.md`). The README screenshot (`docs/screenshot.png`) is staged with fictional projects, conversations and data.
