@@ -14,6 +14,10 @@
 
 </div>
 
+<p align="center">
+  <img src="docs/screenshot.png" width="920" alt="Ultra 9000 on Linux: a sidebar of live agents, shells and Neovim grouped by project (working, question and your-turn states), next to an OMP session that renders an inline chart in the native terminal">
+</p>
+
 ## What it is
 
 Ultra 9000 is a Tauri + Svelte desktop app that wraps **actual native Alacritty rendering and input** (no xterm.js, no browser terminal emulation) in a restrained project-centric interface. Agents, shells and Neovim run in app-owned PTYs, grouped by project in a sidebar.
