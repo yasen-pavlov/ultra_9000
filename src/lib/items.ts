@@ -3,7 +3,7 @@
 import { clockTime, modelShort, shortAge, tildePath } from "./format";
 import type { Attention, ItemState, ToolInfo } from "./native";
 
-export type Badge = "" | "start" | "work" | "need" | "err" | "exit" | "job";
+export type Badge = "" | "start" | "work" | "wait" | "need" | "err" | "exit" | "job";
 
 export interface ItemView {
   /** Row title; launch attempts read "Starting OMP…" / "Couldn't start Codex". */
@@ -16,6 +16,8 @@ export interface ItemView {
   sub: string;
   /** The model whose short name appears in `sub`, so callers can put its provider logo before it. */
   subModel: string | null;
+  /** Row tooltip: the sub line, or for an agent on job its jobs' full labels, kinds and start times. */
+  tooltip: string;
   subIsError: boolean;
   /** Short state wording: "working", "needs approval", "your turn", "exited 1". */
   stateText: string;
@@ -40,6 +42,8 @@ function runningStateText(item: ItemState): string {
   switch (item.activity) {
     case "working":
       return "working";
+    case "on-job":
+      return `waiting on ${jobCount(item.backgroundJobs.length)}`;
     case "needs-you":
       return item.attention === null ? "needs you" : NEEDS_YOU_TEXT[item.attention];
     case "your-turn":
@@ -71,6 +75,9 @@ function runningAgentStatus(item: ItemState, now: number): string {
   switch (item.activity) {
     case "needs-you":
       return `${item.attention ?? "needs you"} ${age}`;
+    case "on-job":
+      // Board 28: job labels sit where the age normally is, oldest first; the pill carries the age.
+      return item.backgroundJobs.map((job) => job.label).join(", ");
     case "working":
     case "your-turn":
     case "error":
@@ -119,6 +126,17 @@ function applyRunningAgent(view: ItemView, item: ItemState, label: string, now: 
       view.pill = "working";
       view.pillClass = "work";
       break;
+    case "on-job": {
+      // Board 28 (decision 22): the agent yielded while its own background jobs run.
+      const count = item.backgroundJobs.length;
+      view.badge = "wait";
+      view.pill = `${count === 1 ? "on job" : `on ${count} jobs`} ${shortAge(item.stateSince, now)}`;
+      view.pillClass = "wait";
+      view.tooltip = item.backgroundJobs
+        .map((job) => `${job.label} — ${job.kind}, since ${clockTime(job.startedAtMs)}`)
+        .join("\n");
+      break;
+    }
     case "needs-you":
       view.badge = "need";
       view.badgeGlyph = "!";
@@ -141,6 +159,15 @@ function applyRunningAgent(view: ItemView, item: ItemState, label: string, now: 
   }
 }
 
+function jobCount(count: number): string {
+  return count === 1 ? "1 background job" : `${count} background jobs`;
+}
+
+/** Context bar line for an agent on job (board 28): every label, then what the user may do meanwhile. */
+export function onJobNote(item: ItemState): string {
+  return [...item.backgroundJobs.map((job) => job.label), "you can type; the agent resumes when they end"].join(" · ");
+}
+
 export function itemView(item: ItemState, context: ItemViewContext): ItemView {
   const label = context.tool?.label ?? item.tool;
   const view: ItemView = {
@@ -151,6 +178,7 @@ export function itemView(item: ItemState, context: ItemViewContext): ItemView {
     pillClass: "",
     sub: "",
     subModel: null,
+    tooltip: "",
     subIsError: false,
     stateText: stateText(item),
     rowClass: "",
@@ -180,5 +208,6 @@ export function itemView(item: ItemState, context: ItemViewContext): ItemView {
       else applyRunningAgent(view, item, label, context.now);
       break;
   }
+  if (view.tooltip === "") view.tooltip = view.sub;
   return view;
 }

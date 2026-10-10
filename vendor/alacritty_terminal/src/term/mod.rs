@@ -2399,29 +2399,6 @@ impl<T: EventListener> Handler for Term<T> {
 
     /// OSC sequence not handled by vte.
     fn osc_unhandled(&mut self, params: &[&[u8]], terminator: &str) {
-        // embed: Forward OSC 777 without logging private agent payloads. Rejoin the vte
-        // parameters since semicolons inside JSON were split by the OSC parser.
-        if params.first() == Some(&&b"777"[..]) {
-            const LIMIT: usize = 16 * 1024;
-            let mut payload = Vec::with_capacity(
-                params[1..].iter().map(|part| part.len() + 1).sum::<usize>().min(LIMIT),
-            );
-            for (index, part) in params[1..].iter().enumerate() {
-                if index != 0 && payload.len() < LIMIT {
-                    payload.push(b';');
-                }
-                let count = part.len().min(LIMIT - payload.len());
-                payload.extend_from_slice(&part[..count]);
-                if payload.len() == LIMIT {
-                    break;
-                }
-            }
-            // Reject invalid/truncated UTF-8 instead of expanding it beyond the byte cap.
-            if let Ok(payload) = String::from_utf8(payload) {
-                self.event_proxy.send_event(Event::HostNotify(payload));
-            }
-            return;
-        }
         if params.first() == Some(&&b"1337"[..]) && crate::graphics::osc1337::handle(self, params) {
             return;
         }
@@ -2710,45 +2687,6 @@ mod tests {
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
-
-    // embed: Exercise the real parser-to-terminal hook, including JSON semicolons.
-    #[test]
-    fn osc777_rejoins_payload_and_redacts_debug() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        #[derive(Clone)]
-        struct Listener(Rc<RefCell<Vec<Event>>>);
-        impl EventListener for Listener {
-            fn send_event(&self, event: Event) { self.0.borrow_mut().push(event); }
-        }
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let mut term = Term::new(Config::default(), &TermSize::new(24, 80), Listener(events.clone()));
-        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
-        let input = b"\x1b]777;notify;warp://cli-agent;{\"event\":\"stop\",\"response\":\"one;two;three\"}\x07";
-        parser.advance(&mut term, input);
-        let events = events.borrow();
-        let payload = events.iter().find_map(|event| match event {
-            Event::HostNotify(text) => Some(text.as_str()),
-            _ => None,
-        }).unwrap();
-        assert_eq!(payload, "notify;warp://cli-agent;{\"event\":\"stop\",\"response\":\"one;two;three\"}");
-        assert_eq!(format!("{:?}", Event::HostNotify(payload.into())), "HostNotify");
-    }
-
-    // embed: The hook never forwards more than 16 KiB.
-    #[test]
-    fn osc777_payload_is_bounded() {
-        use std::cell::Cell;
-        struct Listener(Cell<usize>);
-        impl EventListener for Listener {
-            fn send_event(&self, event: Event) {
-                if let Event::HostNotify(text) = event { self.0.set(text.len()); }
-            }
-        }
-        let mut term = Term::new(Config::default(), &TermSize::new(24, 80), Listener(Cell::new(0)));
-        term.osc_unhandled(&[b"777", &vec![b'x'; 32 * 1024]], "\x07");
-        assert_eq!(term.event_proxy.0.get(), 16 * 1024);
-    }
 
     #[test]
     fn scroll_display_page_up() {

@@ -93,7 +93,7 @@ fn tool_enums_map_each_configured_choice() {
 }
 
 #[test]
-fn builtin_overrides_keep_unconfigured_fields_and_append_env() {
+fn builtin_overrides_keep_unconfigured_fields_and_add_env() {
     let f = Fixture::new();
     fs::write(
         &f.0.ultra,
@@ -107,13 +107,7 @@ fn builtin_overrides_keep_unconfigured_fields_and_append_env() {
     assert_eq!(omp.glyph, builtin.glyph);
     assert_eq!(omp.resume, builtin.resume);
     assert_eq!(omp.status, StatusSource::Omp);
-    assert_eq!(
-        omp.env,
-        [
-            ("WARP_CLI_AGENT_PROTOCOL_VERSION".into(), "1".into()),
-            ("PI_NOTIFICATIONS".into(), "on".into())
-        ]
-    );
+    assert_eq!(omp.env, [("PI_NOTIFICATIONS".into(), "on".into())]);
     assert_eq!(store.settings().tools.len(), builtins().len());
 }
 

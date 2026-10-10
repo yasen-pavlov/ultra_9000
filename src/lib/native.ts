@@ -14,13 +14,20 @@ export type { UnlistenFn };
 
 export type ItemKind = "agent" | "terminal";
 export type ProcessState = "starting" | "running" | "exited" | "failed";
-export type Activity = "unknown" | "working" | "needs-you" | "your-turn" | "error";
+export type Activity = "unknown" | "working" | "needs-you" | "your-turn" | "on-job" | "error";
 export type Attention = "approval" | "question" | null;
 
 export interface ConversationRef {
   tool: string;
   id: string;
   path: string;
+}
+
+/** A background job an agent waits on while on job (OMP `jobType` → `kind`, e.g. "bash", "task"). */
+export interface BackgroundJob {
+  kind: string;
+  label: string;
+  startedAtMs: number;
 }
 
 export interface ItemState {
@@ -46,6 +53,8 @@ export interface ItemState {
   pid: number | null;
   /** Shell items only: the job holding the terminal (`cargo`), null at the prompt. Polled ~1 s, debounced. */
   foregroundJob: { command: string; sinceMs: number } | null;
+  /** Non-empty only while `activity === "on-job"`; oldest first. */
+  backgroundJobs: BackgroundJob[];
 }
 
 export interface ProjectState {

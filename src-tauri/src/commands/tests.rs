@@ -239,7 +239,7 @@ fn close_asks_before_stopping_a_running_agent() {
 
     let agent = launch(&main, "omp", &cwd).unwrap();
     let key = host.complete(&agent);
-    host.omp_event(key, r#"{"event":"prompt_submit"}"#);
+    host.omp(&agent, r#"{"type":"state","state":"working"}"#);
     assert_eq!(
         main.run(item_close(agent.clone(), false)).unwrap(),
         "confirm"

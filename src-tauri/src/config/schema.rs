@@ -190,11 +190,7 @@ pub fn builtins() -> Vec<ToolSpec> {
         } else {
             StatusSource::Process
         },
-        env: if id == "omp" {
-            vec![("WARP_CLI_AGENT_PROTOCOL_VERSION".into(), "1".into())]
-        } else {
-            vec![]
-        },
+        env: vec![],
     })
     .collect()
 }

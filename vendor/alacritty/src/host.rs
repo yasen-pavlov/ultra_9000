@@ -153,71 +153,8 @@ impl<T> fmt::Debug for EventLoopClosed<T> {
     }
 }
 
-/// embed: OSC notifications are bounded on the producer, even if the host never pumps.
-pub(crate) const NOTIFICATION_COUNT_LIMIT: usize = 128;
-pub(crate) const NOTIFICATION_BYTE_LIMIT: usize = 256 * 1024;
-
-struct ProxyQueue<T> {
-    events: VecDeque<(u64, T)>,
-    notifications: VecDeque<(u64, T, usize)>,
-    notification_bytes: usize,
-    sequence: u64,
-}
-
-impl<T> Default for ProxyQueue<T> {
-    fn default() -> Self {
-        Self {
-            events: VecDeque::new(),
-            notifications: VecDeque::new(),
-            notification_bytes: 0,
-            sequence: 0,
-        }
-    }
-}
-
-impl<T> ProxyQueue<T> {
-    fn push(&mut self, event: T, notification_bytes: Option<usize>) {
-        let sequence = self.sequence;
-        self.sequence = self.sequence.wrapping_add(1);
-        if let Some(bytes) = notification_bytes {
-            if bytes > NOTIFICATION_BYTE_LIMIT { return; }
-            while self.notifications.len() >= NOTIFICATION_COUNT_LIMIT
-                || self.notification_bytes + bytes > NOTIFICATION_BYTE_LIMIT
-            {
-                let (_, _, dropped_bytes) = self.notifications.pop_front().unwrap();
-                self.notification_bytes -= dropped_bytes;
-            }
-            self.notification_bytes += bytes;
-            self.notifications.push_back((sequence, event, bytes));
-        } else {
-            self.events.push_back((sequence, event));
-        }
-    }
-
-    fn drain(&mut self) -> VecDeque<T> {
-        let mut drained = VecDeque::with_capacity(self.events.len() + self.notifications.len());
-        while !self.events.is_empty() || !self.notifications.is_empty() {
-            let take_normal = match (self.events.front(), self.notifications.front()) {
-                (Some((normal, _)), Some((notification, _, _))) => {
-                    // Wrapping sequence order is safe across u64 rollover.
-                    (normal.wrapping_sub(*notification) as i64) < 0
-                },
-                (Some(_), None) => true,
-                _ => false,
-            };
-            if take_normal {
-                drained.push_back(self.events.pop_front().unwrap().1);
-            } else {
-                drained.push_back(self.notifications.pop_front().unwrap().1);
-            }
-        }
-        self.notification_bytes = 0;
-        drained
-    }
-}
-
 struct ProxyShared<T> {
-    queue: Mutex<ProxyQueue<T>>,
+    queue: Mutex<VecDeque<T>>,
     wake_pending: AtomicBool,
     closed: AtomicBool,
     /// Wakes the main thread for the owner identified by `context`.
@@ -251,7 +188,7 @@ impl<T> EventLoopProxy<T> {
     pub(crate) fn new(wake: fn(u64), context: u64) -> Self {
         Self {
             shared: Arc::new(ProxyShared {
-                queue: Mutex::new(ProxyQueue::default()),
+                queue: Mutex::new(VecDeque::new()),
                 wake_pending: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
                 wake,
@@ -262,20 +199,6 @@ impl<T> EventLoopProxy<T> {
 
     /// Queue an event for the main thread.
     pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {
-        self.enqueue(event, None)
-    }
-
-    /// embed: Notifications never enter the unbounded generic event queue. The bounded
-    /// lane drops its oldest entries while keeping surviving events in global FIFO order.
-    pub(crate) fn send_notification(
-        &self,
-        event: T,
-        bytes: usize,
-    ) -> Result<(), EventLoopClosed<T>> {
-        self.enqueue(event, Some(bytes))
-    }
-
-    fn enqueue(&self, event: T, notification_bytes: Option<usize>) -> Result<(), EventLoopClosed<T>> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(EventLoopClosed(event));
         }
@@ -286,7 +209,7 @@ impl<T> EventLoopProxy<T> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(EventLoopClosed(event));
         }
-        queue.push(event, notification_bytes);
+        queue.push_back(event);
         drop(queue);
 
         if !self.shared.wake_pending.swap(true, Ordering::AcqRel) {
@@ -301,13 +224,13 @@ impl<T> EventLoopProxy<T> {
         // Clear the flag before taking the queue, so a concurrent send after the take
         // schedules another wakeup instead of being stranded.
         self.shared.wake_pending.store(false, Ordering::Release);
-        self.shared.queue.lock().drain()
+        std::mem::take(&mut *self.shared.queue.lock())
     }
 
     /// Reject all future events and drop queued ones.
     pub(crate) fn close(&self) {
         self.shared.closed.store(true, Ordering::Release);
-        *self.shared.queue.lock() = ProxyQueue::default();
+        self.shared.queue.lock().clear();
     }
 }
 

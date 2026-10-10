@@ -19,8 +19,6 @@
 //! - winit event/loop/key types come from `crate::host`. The terminal view is the platform's
 //!   (`crate::platform`): an AppKit `NSView` on macOS, a GTK input widget plus Wayland
 //!   subsurface on Linux; the macOS-only `ActiveEventLoop` exists only there, as upstream.
-//! - embed: OSC 777 notifications use a producer-bounded proxy lane; a stalled host cannot
-//!   accumulate unbounded agent payloads in the generic terminal event queue.
 //! - embed: Unreachable touchscreen gestures, standalone message-bar handling and unused
 //!   processor config access are removed; native hosts produce neither touch nor log notices.
 
@@ -203,10 +201,6 @@ impl Processor {
                 // embed: Upstream removes the window here. The embedded terminal keeps its
                 // view and content; the PTY event loop has finished.
                 window_context.on_terminal_exit();
-            },
-            // embed: OSC notifications bypass UI handling, but BEL still rings visually.
-            (EventType::Terminal(TerminalEvent::HostNotify(text)), Some(_)) => {
-                window_context.push_host_event(crate::window_context::PendingHostEvent::Notify(text));
             },
             (EventType::Terminal(TerminalEvent::Bell), Some(_)) => {
                 window_context.push_host_event(crate::window_context::PendingHostEvent::Bell);
@@ -1462,9 +1456,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     TerminalEvent::PtyWrite(text) => self.ctx.write_to_pty(text.into_bytes()),
                     TerminalEvent::MouseCursorDirty => self.reset_mouse_cursor(),
                     TerminalEvent::CursorBlinkingChange => self.ctx.update_cursor_blinking(),
-                    // embed: HostNotify was consumed by the processor, never by input.
-                    TerminalEvent::HostNotify(_) | TerminalEvent::Exit
-                        | TerminalEvent::ChildExit(_) | TerminalEvent::Wakeup => (),
+                    TerminalEvent::Exit | TerminalEvent::ChildExit(_) | TerminalEvent::Wakeup => (),
                 },
                 EventType::CreateWindow | EventType::Frame => (),
             },
@@ -1597,77 +1589,12 @@ impl EventProxy {
 
     /// Send an event to the event loop.
     pub fn send_event(&self, event: EventType) {
-        let bytes = match &event {
-            EventType::Terminal(TerminalEvent::HostNotify(text)) => Some(text.len()),
-            _ => None,
-        };
-        let event = Event::new(event, self.window_id);
-        if let Some(bytes) = bytes {
-            let _ = self.proxy.send_notification(event, bytes);
-        } else {
-            let _ = self.proxy.send_event(event);
-        }
+        let _ = self.proxy.send_event(Event::new(event, self.window_id));
     }
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: TerminalEvent) {
-        self.send_event(event.into());
-    }
-}
-
-#[cfg(test)]
-mod notification_tests {
-    use super::*;
-    use crate::host::{NOTIFICATION_BYTE_LIMIT, NOTIFICATION_COUNT_LIMIT};
-
-    #[test]
-    fn paused_consumer_notification_flood_is_bounded_and_fifo() {
-        // No pump runs until the complete flood has been produced.
-        let proxy = EventLoopProxy::new(|_| (), 1);
-        let sender = EventProxy::new(proxy.clone(), WindowId::from(1));
-        sender.send_event(TerminalEvent::Title("before".into()).into());
-        for index in 0..10_000 {
-            EventListener::send_event(&sender, TerminalEvent::HostNotify(index.to_string()));
-        }
-        sender.send_event(TerminalEvent::Title("after".into()).into());
-        let mut events = proxy.drain();
-        assert_eq!(events.len(), NOTIFICATION_COUNT_LIMIT + 2);
-        assert!(matches!(events.pop_front().unwrap().payload,
-            EventType::Terminal(TerminalEvent::Title(text)) if text == "before"));
-        for index in 10_000 - NOTIFICATION_COUNT_LIMIT..10_000 {
-            assert!(matches!(events.pop_front().unwrap().payload,
-                EventType::Terminal(TerminalEvent::HostNotify(text)) if text == index.to_string()));
-        }
-        assert!(matches!(events.pop_front().unwrap().payload,
-            EventType::Terminal(TerminalEvent::Title(text)) if text == "after"));
-
-        // Large payloads hit the byte bound before the count bound.
-        let payload_bytes = 16 * 1024;
-        for index in 0..1_000 {
-            let text = format!("{index:04}{}", "x".repeat(payload_bytes - 4));
-            EventListener::send_event(&sender, TerminalEvent::HostNotify(text));
-            if index == 998 {
-                sender.send_event(TerminalEvent::Bell.into());
-            }
-        }
-        let events = proxy.drain();
-        let notifications: Vec<_> = events.iter().filter_map(|event| match &event.payload {
-            EventType::Terminal(TerminalEvent::HostNotify(text)) => Some(text),
-            _ => None,
-        }).collect();
-        let retained = NOTIFICATION_BYTE_LIMIT / payload_bytes;
-        assert_eq!(notifications.len(), retained);
-        assert_eq!(notifications.iter().map(|text| text.len()).sum::<usize>(),
-            NOTIFICATION_BYTE_LIMIT);
-        for (offset, text) in notifications.iter().enumerate() {
-            assert!(text.starts_with(&format!("{:04}", 1_000 - retained + offset)));
-        }
-        assert!(matches!(events[events.len() - 2].payload,
-            EventType::Terminal(TerminalEvent::Bell)));
-        assert!(proxy.drain().is_empty());
-        proxy.close();
-        EventListener::send_event(&sender, TerminalEvent::HostNotify("closed".into()));
-        assert!(proxy.drain().is_empty());
+        let _ = self.proxy.send_event(Event::new(event.into(), self.window_id));
     }
 }

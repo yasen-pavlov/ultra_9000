@@ -107,15 +107,7 @@ fn builtins_match_the_documented_tool_table() {
     );
     assert_eq!(row("shell"), (None, None, None, Process, Terminal));
     assert_eq!(row("neovim"), (Some("nvim"), None, None, Process, Terminal));
-    let omp = tools.iter().find(|t| t.id == "omp").unwrap();
-    assert_eq!(
-        omp.env,
-        [("WARP_CLI_AGENT_PROTOCOL_VERSION".to_owned(), "1".to_owned())]
-    );
-    assert!(tools
-        .iter()
-        .filter(|t| t.id != "omp")
-        .all(|t| t.env.is_empty()));
+    assert!(tools.iter().all(|t| t.env.is_empty()));
 }
 
 #[test]

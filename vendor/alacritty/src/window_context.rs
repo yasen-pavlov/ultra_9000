@@ -63,7 +63,7 @@ type PtyThread = JoinHandle<(PtyEventLoop<Pty, EventProxy>, State)>;
 
 
 // embed: Discrete host events, FIFO bounded independently of terminal-state snapshots.
-pub(crate) enum PendingHostEvent { Notify(String), Bell }
+pub(crate) enum PendingHostEvent { Bell }
 const HOST_EVENT_LIMIT: usize = 128;
 /// Event context for one individual Alacritty window.
 pub struct WindowContext {
@@ -89,7 +89,7 @@ pub struct WindowContext {
     io_thread: Option<PtyThread>,
     /// embed: Child exit status, once the child exited.
     child_exit: Option<Option<i32>>,
-    // embed: At most 128 events; each notification is at most 16 KiB.
+    // embed: At most 128 events.
     host_events: VecDeque<PendingHostEvent>,
 }
 

@@ -43,6 +43,10 @@
         };
       }
       if (item.activity === "working") return { text: "working — this turn is lost", lost: true };
+      if (item.activity === "on-job") {
+        const labels = item.backgroundJobs.map((job) => job.label).join(", ");
+        return { text: `waiting on its jobs (${labels}) — ending stops them`, lost: true };
+      }
       if (tool?.status === "omp") return { text: "saved · resumable", lost: false };
       return { text: `${tool?.label ?? item.tool} keeps its own save`, lost: false };
     }
