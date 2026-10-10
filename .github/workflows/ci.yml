@@ -39,7 +39,8 @@ jobs:
       pull-requests: read # list a PR's changed files
     outputs:
       native: ${{ steps.filter.outputs.native }}
-      packaging: ${{ steps.filter.outputs.packaging }}
+      arch: ${{ steps.filter.outputs.arch }}
+      aur: ${{ steps.filter.outputs.aur }}
     steps:
       # Pull requests are diffed through the API; pushes to main are diffed with git.
       - name: Check out
@@ -59,8 +60,9 @@ jobs:
               - '.github/workflows/ci.yml'
             # Everything the release's Arch job reads: the PKGBUILD and the files it installs,
             # and the files scripts/set-version.ts stamps.
-            packaging:
-              - 'packaging/**'
+            arch:
+              - 'packaging/arch/**'
+              - 'packaging/linux/**'
               - 'scripts/set-version.ts'
               - 'package.json'
               - 'src-tauri/Cargo.toml'
@@ -71,6 +73,12 @@ jobs:
               - 'vendor/LICENSE-*'
               - 'vendor/PROVENANCE.md'
               - '.github/workflows/release.yml'
+              - '.github/workflows/ci.yml'
+            # The AUR check builds the latest published release, so only its templates, its
+            # script and the depends it must match can change the result.
+            aur:
+              - 'packaging/aur/**'
+              - 'packaging/arch/PKGBUILD'
               - '.github/workflows/aur.yml'
               - '.github/workflows/ci.yml'
 
@@ -388,7 +396,7 @@ jobs:
     needs: changes
     # Builds the release's Arch package path so a PKGBUILD regression fails here, not on
     # release day.
-    if: needs.changes.outputs.packaging == 'true'
+    if: needs.changes.outputs.arch == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     container:
@@ -414,7 +422,7 @@ jobs:
     name: AUR
     needs: changes
     # Builds and checks the AUR PKGBUILD templates against the latest release; never pushes.
-    if: needs.changes.outputs.packaging == 'true'
+    if: needs.changes.outputs.aur == 'true'
     permissions:
       contents: read
     # actionlint (1.7.12, the latest) rejects the self-repository `$/` form.
