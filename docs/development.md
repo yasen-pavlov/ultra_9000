@@ -126,7 +126,7 @@ No daemon preserves processes after full quit, crash, logout or reboot. Cleanup 
 - `src/`: Svelte sidebar, palette, sheets, native command bindings and geometry/focus sequencing.
 - `src-tauri/`: app startup and run-loop events (`lib.rs`; `main.rs` is the `ultra9000` executable), native item/project model (`workspace.rs`), commands, lifecycle, launch, settings files (`config/`), read-only agent store discovery (`discovery/`), OMP status (`status.rs`), shortcut keymap (`shortcuts.rs`), platform layers (`macos.rs`, `linux.rs`) and the GUI integration tests (`tests/`).
 - `vendor/`: pinned open-source Alacritty components with the graphics patch and the macOS/Linux embedding adaptations; see [provenance and licenses](../vendor/PROVENANCE.md).
-- `packaging/arch/`: in-tree Arch Linux PKGBUILD.
+- `packaging/arch/`: in-tree Arch Linux PKGBUILD (the release's package). `packaging/aur/`: the AUR packages' PKGBUILD templates and `publish.sh` ([releasing](releasing.md#aur-packages)).
 - `.github/`: CI, release and dependency-update workflows, issue/PR templates and the repository rulesets.
 - `assets/icons/`: SVG masters for the app, tray, tool and provider icons, and the third-party mark sources with their licenses (`brand-sources/`).
 - `scripts/`: `icons.py` regenerates the committed icon PNGs/ICNS from `assets/icons/`; `set-version.ts` stamps release versions.

@@ -71,6 +71,7 @@ jobs:
               - 'vendor/LICENSE-*'
               - 'vendor/PROVENANCE.md'
               - '.github/workflows/release.yml'
+              - '.github/workflows/aur.yml'
               - '.github/workflows/ci.yml'
 
   frontend:
@@ -409,6 +410,18 @@ jobs:
       - name: Build package
         run: packaging/arch/container-build.sh
 
+  aur:
+    name: AUR
+    needs: changes
+    # Builds and checks the AUR PKGBUILD templates against the latest release; never pushes.
+    if: needs.changes.outputs.packaging == 'true'
+    permissions:
+      contents: read
+    # actionlint (1.7.12, the latest) rejects the self-repository `$/` form.
+    uses: ./.github/workflows/aur.yml # zizmor: ignore[self-repository]
+    with:
+      tag: latest
+
   sonar:
     name: SonarQube Cloud
     needs: [frontend, rust-linux, rust-macos]
@@ -463,7 +476,7 @@ jobs:
   ci-ok:
     name: CI ok
     if: always()
-    needs: [changes, frontend, rust-linux, rust-macos, msrv, deny, workflow-lint, package-arch, sonar]
+    needs: [changes, frontend, rust-linux, rust-macos, msrv, deny, workflow-lint, package-arch, aur, sonar]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}

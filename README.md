@@ -46,7 +46,14 @@ Download `ultra-9000_<version>_aarch64.dmg`, open it and drag **Ultra 9000** to 
 
 ### Arch Linux / CachyOS
 
-Install the release package:
+From the AUR, either the prebuilt release package or a build from source:
+
+```sh
+yay -S ultra-9000-bin   # the release's package, installs in seconds
+yay -S ultra-9000       # builds the release tag from source (Rust and Bun)
+```
+
+Or install the release package directly:
 
 ```sh
 sudo pacman -U ultra-9000-*-x86_64.pkg.tar.zst

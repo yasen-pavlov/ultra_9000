@@ -4,7 +4,8 @@ name: Release
 # is the version. `prepare` validates the tag and creates a draft GitHub release with notes
 # generated from the Conventional Commits since the previous tag; the build jobs stamp the
 # version into the checkout, build and attach the artifacts; `publish` adds checksums and
-# publishes the draft. Run the workflow manually with an existing tag to retry.
+# publishes the draft; `aur` then builds, checks and pushes the AUR packages (aur.yml).
+# Run the workflow manually with an existing tag to retry; aur.yml alone retries the AUR.
 on:
   push:
     tags: ["v*"]
@@ -283,3 +284,16 @@ jobs:
           gh release upload "$TAG" "$RUNNER_TEMP/SHA256SUMS.txt" --repo "$REPO" --clobber
       - name: Publish release
         run: gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+
+  aur:
+    name: AUR
+    needs: [prepare, publish]
+    permissions:
+      contents: read
+    # actionlint (1.7.12, the latest) rejects the self-repository `$/` form.
+    uses: ./.github/workflows/aur.yml # zizmor: ignore[self-repository]
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      publish: true
+    secrets:
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
