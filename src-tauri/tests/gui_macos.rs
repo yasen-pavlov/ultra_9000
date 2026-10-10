@@ -29,7 +29,8 @@ mod macos {
     use objc2::rc::Retained;
     use objc2::{msg_send, sel, MainThreadMarker};
     use objc2_app_kit::{
-        NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow, NSWindowStyleMask,
+        NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow, NSWindowButton,
+        NSWindowStyleMask, NSWindowTitleVisibility,
     };
     use objc2_foundation::{NSPoint, NSString};
     use tauri::{AppHandle, Manager, RunEvent, WebviewWindow};
@@ -396,12 +397,41 @@ mod macos {
             "NSWindow title is \"Ultra 9000\"",
         );
         report.check(
-            window.is_decorated().ok() == Some(false),
-            "Tauri reports no decorations",
+            window.is_decorated().ok() == Some(true),
+            "Tauri reports a system-decorated window",
         );
         report.check(
-            !ns_window.styleMask().contains(NSWindowStyleMask::Titled),
-            "NSWindow has no title bar",
+            ns_window
+                .styleMask()
+                .contains(NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView),
+            "NSWindow is titled (AppKit rounds its corners) with a full-size content view",
+        );
+        report.check(
+            ns_window.titlebarAppearsTransparent(),
+            "NSWindow titlebar is transparent",
+        );
+        report.check(
+            ns_window.titleVisibility() == NSWindowTitleVisibility::Hidden,
+            "NSWindow title text is hidden",
+        );
+        let buttons_hidden = [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ]
+        .into_iter()
+        .all(|kind| {
+            ns_window
+                .standardWindowButton(kind)
+                .is_none_or(|button| button.isHidden())
+        });
+        report.check(buttons_hidden, "traffic lights are hidden");
+        report.check(ns_window.hasShadow(), "NSWindow has a shadow");
+        let content = ns_window.contentView().map(|view| view.frame().size);
+        let frame = ns_window.frame().size;
+        report.check(
+            content == Some(frame),
+            &format!("content view fills the window, no title bar gap ({content:?} in {frame:?})"),
         );
         report.check(
             window.is_visible().ok() == Some(true),

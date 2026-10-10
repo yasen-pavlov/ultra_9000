@@ -131,8 +131,8 @@ fn app() -> App {
 
 fn on_run_event(app: &AppHandle, event: RunEvent) {
     match event {
-        // No title bar exists, but the OS can still ask to close (e.g. Window > Close
-        // shortcuts from other tools): hide instead, keeping every session alive.
+        // No visible title bar or close button, but the OS can still ask to close (e.g.
+        // Window > Close shortcuts from other tools): hide instead, keeping every session alive.
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { api, .. },
@@ -188,21 +188,32 @@ fn create_main_window(app: &App) -> tauri::Result<WebviewWindow> {
     // Tiling Wayland compositors give the window whatever tile it gets. A GTK minimum size
     // larger than the tile only makes GTK draw past it, and the compositor then clips or
     // squashes the window and its terminal subsurface, so Linux follows the tile instead.
+    // macOS: AppKit only rounds (and clips, GL views included) titled windows, so the window
+    // is titled with a transparent full-size titlebar, its title and traffic lights hidden:
+    // system corners, border and shadow with no visible title bar (Alacritty's "Buttonless").
     #[cfg(target_os = "macos")]
-    let builder = builder.min_inner_size(640., 400.);
+    let builder = builder
+        .min_inner_size(640., 400.)
+        .decorations(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
     // tao (0.37+) installs a GTK titlebar on Wayland for undecorated windows after applying
     // visibility; on an already realized window GTK warns and unrealizes it to do so. Building
     // hidden and showing afterwards gives the same window without that cycle.
     #[cfg(target_os = "linux")]
-    let builder = builder.visible(false);
+    let builder = builder.visible(false).decorations(false);
     let window = builder
-        .decorations(false)
         .resizable(true)
         .shadow(true)
         .zoom_hotkeys_enabled(false)
         .background_color(BACKGROUND)
         .on_navigation(is_local_url)
         .build()?;
+    // SAFETY: the window was just built on the main thread and is alive.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        macos::hide_window_buttons(window.ns_window()?)
+    };
     #[cfg(target_os = "linux")]
     window.show()?;
     Ok(window)

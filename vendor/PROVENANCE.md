@@ -154,7 +154,7 @@ pins). Files in `alacritty/src/platform/macos/`:
 
 | File | winit source | Change |
 |---|---|---|
-| `view.rs` | `src/platform_impl/macos/view.rs` | See file header: embed host events routed by the view's session key, sibling-view focus/occlusion/scale, Edit menu actions. embed: physical kVK + exact semantic-modifier conversion and the host-supplied shortcut router, shared with the AppKit local monitor. When the router declines a native-menu chord, preserve the base view's exclusions (Cmd+Q/W/M/T/1..9/H, Cmd+Option+H, Cmd+Shift+physical brackets) and pass it through to AppKit; Hide Others remains native-menu owned. |
+| `view.rs` | `src/platform_impl/macos/view.rs` | See file header: embed host events routed by the view's session key, sibling-view focus/occlusion/scale, Edit menu actions. embed: physical kVK + exact semantic-modifier conversion and the host-supplied shortcut router, shared with the AppKit local monitor. When the router declines a native-menu chord, preserve the base view's exclusions (Cmd+Q/W/M/T/1..9/H, Cmd+Option+H, Cmd+Shift+physical brackets) and pass it through to AppKit; Hide Others remains native-menu owned. embed: `mouseDownCanMoveWindow` returns NO, because the host's titled window overlays a transparent titlebar on the content and AppKit would otherwise let a (rounded, hence non-opaque) terminal view drag the window instead of selecting. |
 | `event.rs` | `src/platform_impl/macos/event.rs` | Produces host `KeyEvent`/`Modifiers`; public scancode trait; local CF FFI. |
 | `cursor.rs` | `src/platform_impl/macos/cursor.rs` | Custom RGBA cursors removed. |
 | `ffi.rs` | `src/platform_impl/macos/ffi.rs` | Keyboard layout subset; adds libdispatch main-queue FFI. |
