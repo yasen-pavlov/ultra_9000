@@ -7,6 +7,9 @@
 **A keyboard-first agent harness with real native Alacritty terminals.**
 
 [![CI](https://github.com/yasen-pavlov/ultra_9000/actions/workflows/ci.yml/badge.svg)](https://github.com/yasen-pavlov/ultra_9000/actions/workflows/ci.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=yasen-pavlov_ultra_9000&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=yasen-pavlov_ultra_9000)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=yasen-pavlov_ultra_9000&metric=coverage)](https://sonarcloud.io/summary/new_code?id=yasen-pavlov_ultra_9000)
+[![Release](https://img.shields.io/github/v/release/yasen-pavlov/ultra_9000)](https://github.com/yasen-pavlov/ultra_9000/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 </div>
