@@ -44,9 +44,15 @@ fn nothing_more(rx: &mpsc::Receiver<Delivery>) {
 }
 /// The server closed the connection (it never writes, so a read only sees the end).
 fn closed(stream: &mut UnixStream) -> bool {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    closed_within(stream, Duration::from_secs(5))
+}
+fn closed_within(stream: &mut UnixStream, wait: Duration) -> bool {
+    match stream.set_read_timeout(Some(wait)) {
+        Ok(()) => {}
+        // macOS refuses socket options (EINVAL) once the server has shut the connection down.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => return true,
+        Err(e) => panic!("cannot set a read timeout: {e}"),
+    }
     matches!(stream.read(&mut [0u8; 1]), Ok(0))
 }
 fn working() -> Message {
@@ -229,10 +235,7 @@ fn messages_after_hello_reach_the_tokens_item_in_order() {
 
 /// Whether the server closes the connection within a short wait.
 fn closed_soon(stream: &mut UnixStream) -> bool {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
-    matches!(stream.read(&mut [0u8; 1]), Ok(0))
+    closed_within(stream, Duration::from_millis(200))
 }
 
 #[test]
