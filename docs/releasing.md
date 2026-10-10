@@ -88,7 +88,7 @@ They conflict with each other. Their templates live in `packaging/aur/<package>/
 1. Fills in `pkgver`, `pkgrel` and `sha256sums`.
 2. Builds both packages with `makepkg` and checks them with `namcap` (an error fails the run).
 3. Installs each package and requires every shared library of `/usr/bin/ultra9000` to resolve.
-4. Only then, when `AUR_PUSH=true`, commits `PKGBUILD` and `.SRCINFO` to each AUR repository over SSH. AUR's host key is pinned in the script; no third-party action handles the key.
+4. Only then, when `AUR_PUSH=true`, commits `PKGBUILD` and `.SRCINFO` to each AUR repository over SSH. AUR's host key is pinned in the script; no third-party action handles the key. Before building, a publishing run checks that it can reach both AUR repositories with the key, so a missing key or `ssh` fails in seconds.
 
 It refuses to publish an older `pkgver-pkgrel` than the AUR has, or to change the contents of one that is already published. Re-running an unchanged release is a no-op.
 

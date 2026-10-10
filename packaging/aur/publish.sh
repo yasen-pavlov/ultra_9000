@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Renders the AUR packages for a published release, test-builds and checks them, and with
 # AUR_PUSH=true publishes them. Runs as root inside the pinned archlinux container
-# (.github/workflows/aur.yml); git, jq and namcap must be installed.
+# (.github/workflows/aur.yml); git, jq and namcap must be installed, and openssh to publish.
 #
 #   packaging/aur/publish.sh <vX.Y.Z | latest> [pkgrel]
 #
@@ -37,6 +37,22 @@ echo "AUR packages for $tag (pkgver $version, pkgrel $pkgrel)"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work" "$HOME/.ssh/aur"' EXIT
+
+# Publishing: set up and test AUR access before spending minutes on builds.
+publish=${AUR_PUSH:-false}
+if [ "$publish" = true ]; then
+  command -v ssh > /dev/null || { echo "::error::ssh is required to publish (install openssh)" >&2; exit 1; }
+  : "${AUR_SSH_PRIVATE_KEY:?AUR_SSH_PRIVATE_KEY is required to publish}"
+  install -d -m 700 "$HOME/.ssh"
+  printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$HOME/.ssh/aur"
+  chmod 600 "$HOME/.ssh/aur"
+  printf '%s\n' "$aur_host_key" > "$work/known_hosts"
+  export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$work/known_hosts"
+  for package in "${packages[@]}"; do
+    git ls-remote "ssh://aur@aur.archlinux.org/$package.git" > /dev/null
+  done
+  echo "AUR access works."
+fi
 
 # A PKGBUILD array, read the way makepkg does (the PKGBUILDs only declare variables and
 # functions at the top level).
@@ -106,17 +122,10 @@ for package in "${packages[@]}"; do
   fi
 done
 
-if [ "${AUR_PUSH:-false}" != true ]; then
+if [ "$publish" != true ]; then
   echo "Built and checked; not publishing (AUR_PUSH is not true)."
   exit 0
 fi
-
-: "${AUR_SSH_PRIVATE_KEY:?AUR_SSH_PRIVATE_KEY is required to publish}"
-install -d -m 700 "$HOME/.ssh"
-printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$HOME/.ssh/aur"
-chmod 600 "$HOME/.ssh/aur"
-printf '%s\n' "$aur_host_key" > "$work/known_hosts"
-export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$work/known_hosts"
 
 for package in "${packages[@]}"; do
   dir="$work/$package"
