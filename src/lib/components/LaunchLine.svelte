@@ -31,11 +31,7 @@
   }
 
   type MenuEntry =
-    | { kind: "tool"; tool: ToolInfo }
-    | { kind: "project"; project: ProjectChoice }
-    | { kind: "other-folder" }
-    | { kind: "browse" }
-    | { kind: "separator" };
+    { kind: "tool"; tool: ToolInfo } | { kind: "project"; project: ProjectChoice } | { kind: "separator" };
 
   const home = $derived(workspace.state?.defaultCwd ?? "");
 
@@ -142,13 +138,7 @@
         : [...agents, ...terminals];
     }
     if (menu === "project") {
-      const projects = projectChoices.map((project): MenuEntry => ({ kind: "project", project }));
-      return [
-        ...projects,
-        ...(projects.length > 0 ? [{ kind: "separator" } as const] : []),
-        { kind: "other-folder" },
-        { kind: "browse" },
-      ];
+      return projectChoices.map((project): MenuEntry => ({ kind: "project", project }));
     }
     return [];
   });
@@ -159,6 +149,11 @@
 
   function openMenu(which: "tool" | "project"): void {
     onactivate();
+    // With no projects to pick, the folder field is the only way to choose where to start.
+    if (which === "project" && projectChoices.length === 0) {
+      focusFolder();
+      return;
+    }
     menu = which;
     const index = menuEntries.findIndex((entry) =>
       which === "tool"
@@ -188,13 +183,6 @@
         break;
       case "project":
         setProject(entry.project.id);
-        break;
-      case "other-folder":
-        projectId = null;
-        focusFolder();
-        break;
-      case "browse":
-        void browse();
         break;
       case "separator":
         break;
@@ -259,7 +247,7 @@
     launchError = null;
   }
 
-  export function focusFolder(): void {
+  function focusFolder(): void {
     onactivate();
     folderInput?.focus();
     folderInput?.select();
@@ -371,9 +359,7 @@
     {#if menu === "project"}
       <div class="menu" role="listbox" aria-label="Project">
         {#each menuEntries as entry, index (index)}
-          {#if entry.kind === "separator"}
-            <div class="hr"></div>
-          {:else if entry.kind === "project"}
+          {#if entry.kind === "project"}
             <button
               type="button"
               class="mi"
@@ -385,19 +371,6 @@
               onmouseenter={() => (menuIndex = index)}
             >
               {entry.project.name}<span class="s">{tildePath(entry.project.path, home)}</span>
-            </button>
-          {:else}
-            <button
-              type="button"
-              class="mi"
-              class:sel={index === menuIndex}
-              role="option"
-              aria-selected="false"
-              tabindex="-1"
-              onclick={() => choose(entry)}
-              onmouseenter={() => (menuIndex = index)}
-            >
-              <Icon name="folder" />{entry.kind === "browse" ? "Choose folder…" : "Another folder…"}
             </button>
           {/if}
         {/each}
@@ -425,7 +398,7 @@
       }}
     />
     <button type="button" class="iconbtn" aria-label="Choose folder…" title="Choose folder…" onclick={browse}>
-      <Icon name="search" small />
+      <Icon name="folder-open" small />
     </button>
   </label>
   <span class="go">

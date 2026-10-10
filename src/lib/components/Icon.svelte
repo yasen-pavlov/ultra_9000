@@ -7,6 +7,7 @@
     | "chevron-right"
     | "pin"
     | "folder"
+    | "folder-open"
     | "settings"
     | "keyboard"
     | "sidebar"
@@ -50,6 +51,9 @@
     <path
       d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"
     />
+  {:else if name === "folder-open"}
+    <path d="M2 11.5V4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4A1.5 1.5 0 0 1 13.5 6v1.2" />
+    <path d="M2.2 12.6 4 8a1.5 1.5 0 0 1 1.4-1H14l-1.9 5a1.5 1.5 0 0 1-1.4 1H3.1a1 1 0 0 1-.9-1.4z" />
   {:else if name === "settings"}
     <path d="M2 4h7M12 4h2M2 12h2M7 12h7" /><circle cx="10.5" cy="4" r="1.5" /><circle cx="5.5" cy="12" r="1.5" />
   {:else if name === "keyboard"}

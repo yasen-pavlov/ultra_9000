@@ -767,9 +767,6 @@
                   >
                 </button>
               {/each}
-              <button type="button" class="pj other" onclick={() => launchLine?.focusFolder()}>
-                <Icon name="folder" /><span class="n">Another folder…</span>
-              </button>
             {/if}
           </aside>
         {/if}
@@ -971,9 +968,6 @@
   .pj .c {
     color: var(--dim);
     font-size: 12px;
-  }
-  .pj.other {
-    color: var(--dim);
   }
   .guard {
     display: flex;
