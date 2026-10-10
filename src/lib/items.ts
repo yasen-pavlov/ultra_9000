@@ -129,8 +129,9 @@ function applyRunningAgent(view: ItemView, item: ItemState, label: string, now: 
     case "on-job": {
       // Board 28 (decision 22): the agent yielded while its own background jobs run.
       const count = item.backgroundJobs.length;
+      const jobs = count === 1 ? "on job" : `on ${count} jobs`;
       view.badge = "wait";
-      view.pill = `${count === 1 ? "on job" : `on ${count} jobs`} ${shortAge(item.stateSince, now)}`;
+      view.pill = `${jobs} ${shortAge(item.stateSince, now)}`;
       view.pillClass = "wait";
       view.tooltip = item.backgroundJobs
         .map((job) => `${job.label} — ${job.kind}, since ${clockTime(job.startedAtMs)}`)
