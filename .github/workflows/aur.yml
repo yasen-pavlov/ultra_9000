@@ -1,0 +1,66 @@
+name: AUR
+
+# Builds, checks and publishes the AUR packages ultra-9000 (source) and ultra-9000-bin for a
+# published release (packaging/aur/publish.sh). release.yml calls it after publishing; CI
+# calls it without publishing when packaging changes, against the latest release. Run it by
+# hand to retry a release or to republish packaging changes with a higher pkgrel.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z), or "latest"
+        required: true
+        type: string
+      publish:
+        description: Push to the AUR
+        type: boolean
+        default: false
+    secrets:
+      AUR_SSH_PRIVATE_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag (vX.Y.Z)
+        required: true
+        type: string
+      pkgrel:
+        description: pkgrel (bump to republish packaging changes for the same release)
+        required: true
+        type: string
+        default: "1"
+      publish:
+        description: Push to the AUR
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  aur:
+    name: AUR packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      # Keep in sync with the arch job in release.yml and package-arch in ci.yml.
+      image: archlinux:base-devel-20260927.0.600689@sha256:51dd3d24f7fba779e7c471caeee7804c50e8c134ad948e19685a1c83a42facc3
+    permissions:
+      contents: read
+    concurrency:
+      # Publishing runs one at a time; checks never wait.
+      group: ${{ inputs.publish && 'aur-publish' || format('aur-check-{0}', github.run_id) }}
+      cancel-in-progress: false
+    steps:
+      - name: Install git, jq and namcap
+        run: pacman -Syu --noconfirm --needed git jq namcap
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build, check and publish
+        env:
+          TAG: ${{ inputs.tag }}
+          PKGREL: ${{ inputs.pkgrel || '1' }}
+          AUR_PUSH: ${{ inputs.publish }}
+          AUR_SSH_PRIVATE_KEY: ${{ inputs.publish && secrets.AUR_SSH_PRIVATE_KEY || '' }}
+        run: packaging/aur/publish.sh "$TAG" "$PKGREL"

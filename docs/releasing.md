@@ -30,6 +30,7 @@ flowchart LR
   C --> E[Arch: stamp version, makepkg in an archlinux container]
   D --> F[SHA256SUMS.txt, then publish]
   E --> F
+  F --> G[AUR: build, check, push ultra-9000 and ultra-9000-bin]
 ```
 
 To release the current `main`:
@@ -46,6 +47,7 @@ Everything else runs in `.github/workflows/release.yml` (workflow "Release"):
 1. `Prepare release` requires `vX.Y.Z`, an **annotated tag with a signature GitHub verifies** (your GPG key must be on your GitHub account), and a tagged commit on `main`. It generates notes from the Conventional Commits since the previous tag (`git cliff --current`, `cliff.toml`) and creates a **draft** GitHub release.
 2. `macOS (signed, notarized)` and `Arch Linux package` check out the tag, stamp the version, build, and upload their artifacts to the draft.
 3. `Checksums and publish` checks that every expected asset is present, uploads `SHA256SUMS.txt`, and publishes the release as Latest.
+4. `AUR` (`.github/workflows/aur.yml`) publishes the AUR packages for the release; see [AUR packages](#aur-packages).
 
 The release is published only after every job succeeds. If one fails, the release stays a draft. Fix the cause outside the tagged commit (secrets, runner trouble), then rebuild and publish it with:
 
@@ -53,7 +55,7 @@ The release is published only after every job succeeds. If one fails, the releas
 gh workflow run release.yml -f tag_name=vX.Y.Z
 ```
 
-If the fix needs new commits, delete the draft release and its tag (`gh release delete vX.Y.Z --cleanup-tag`) and tag the fixed commit with the next patch version. A published release and its tag are never modified. `.github/rulesets/release-tags.json` blocks moving or deleting `v*` tags once rulesets are available; repository admins bypass it, so only you can clean up a bad tag. The build jobs check out the exact commit `Prepare release` verified, never the tag name again.
+If the fix needs new commits, delete the draft release and its tag (`gh release delete vX.Y.Z --cleanup-tag`) and tag the fixed commit with the next patch version. A published release and its tag are never modified. The `release tags` ruleset (`.github/rulesets/release-tags.json`) blocks moving or deleting `v*` tags; repository admins bypass it, so only you can clean up a bad tag. The build jobs check out the exact commit `Prepare release` verified, never the tag name again. The `AUR` job runs after publishing, so its failure leaves the release published; retry it with `aur.yml` (below).
 
 ### Artifacts
 
@@ -72,6 +74,43 @@ cd packaging/arch && makepkg -si
 
 It copies the tracked and untracked-but-not-ignored files into `packaging/arch/src/`, so local changes are included and the working tree's `node_modules/`, `dist/` and `target/` are not touched. A checkout build reports version `0.0.0`.
 
+### AUR packages
+
+Two AUR packages follow every release:
+
+- [`ultra-9000-bin`](https://aur.archlinux.org/packages/ultra-9000-bin) installs the release's Arch package as is. Its checksum is taken from `SHA256SUMS.txt`.
+- [`ultra-9000`](https://aur.archlinux.org/packages/ultra-9000) builds the tag from source with `bun` and `cargo`, the same way as the Arch package job.
+
+They conflict with each other. Their templates live in `packaging/aur/<package>/PKGBUILD`, and their `depends` must match `packaging/arch/PKGBUILD`. Never edit them on the AUR.
+
+`packaging/aur/publish.sh <tag> [pkgrel]` runs inside the pinned archlinux container:
+
+1. Fills in `pkgver`, `pkgrel` and `sha256sums`.
+2. Builds both packages with `makepkg` and checks them with `namcap` (an error fails the run).
+3. Installs each package and requires every shared library of `/usr/bin/ultra9000` to resolve.
+4. Only then, when `AUR_PUSH=true`, commits `PKGBUILD` and `.SRCINFO` to each AUR repository over SSH. AUR's host key is pinned in the script; no third-party action handles the key.
+
+It refuses to publish an older `pkgver-pkgrel` than the AUR has, or to change the contents of one that is already published. Re-running an unchanged release is a no-op.
+
+`aur.yml` runs in three ways:
+
+- **After a release:** the `AUR` job in `release.yml` calls it and publishes.
+- **On packaging PRs:** CI's `AUR` job calls it without publishing, against the latest release.
+- **By hand:** to retry a release, or to ship packaging fixes for the same release with a higher `pkgrel`:
+
+```sh
+gh workflow run aur.yml -f tag=vX.Y.Z -f pkgrel=2
+```
+
+The AUR commits are not GPG-signed: the AUR does not verify signatures, and the YubiKey key is not available to CI.
+
+To test locally (no push):
+
+```sh
+docker run --rm -v "$PWD:/repo:ro" archlinux:base-devel bash -c \
+  'pacman -Syu --noconfirm --needed git jq namcap && /repo/packaging/aur/publish.sh latest'
+```
+
 ## Required secrets
 
 | Secret                       | Used by                       | Value                                                          |
@@ -83,6 +122,7 @@ It copies the tracked and untracked-but-not-ignored files into `packaging/arch/s
 | `APPLE_API_ISSUER`           | Release → macOS               | App Store Connect API issuer ID                                |
 | `APPLE_API_KEY`              | Release → macOS               | App Store Connect API key ID                                   |
 | `APPLE_API_KEY_P8`           | Release → macOS               | contents of `AuthKey_<KEYID>.p8`                               |
+| `AUR_SSH_PRIVATE_KEY`        | Release → AUR                 | private SSH key registered on the maintainer's AUR account     |
 
 Missing secrets fail the job with a message naming them. The macOS job never produces an unsigned build. The release workflow otherwise uses only the built-in `GITHUB_TOKEN`; no personal access token is needed, because nothing in the flow has to trigger another workflow.
 
@@ -208,7 +248,8 @@ To change it later, edit the file and `gh api -X PUT repos/yasen-pavlov/ultra_90
 | `MSRV`              | `cargo check --all-targets` with the `rust-version` read from `src-tauri/Cargo.toml`                              | pushes to `main`; PRs with native changes                     |
 | `cargo-deny`        | advisories, licenses, bans, sources per `deny.toml`                                                              | always                                                        |
 | `Workflow lint`     | actionlint and zizmor on `.github/`                                                                              | always                                                        |
-| `Arch package`      | `packaging/arch/container-build.sh` (the release's makepkg path) in the pinned archlinux container, no upload    | only if `packaging/`, `release.yml` or `ci.yml` changed       |
+| `Arch package`      | `packaging/arch/container-build.sh` (the release's makepkg path) in the pinned archlinux container, no upload    | only if packaging inputs changed (the `packaging` filter)      |
+| `AUR`               | `aur.yml` without publishing: builds and checks both AUR packages against the latest release                     | only if packaging inputs changed (the `packaging` filter)      |
 | `SonarQube Cloud`   | scan with the artifacts above                                                                                    | pushes and same-repository PRs (including Dependabot)         |
 | `CI ok`             | fails if any job above failed or was cancelled (skipped is fine)                                                 | always; required check                                        |
 
@@ -228,6 +269,7 @@ zizmor .github
 
 Third-party actions are pinned by commit SHA (version in a trailing comment), and Dependabot (`.github/dependabot.yml`) updates them weekly together with the Cargo and Bun dependencies, after a 7-day cooldown. Dependabot does not track the remaining pins, which are updated by hand:
 
-- the `archlinux:base-devel` container image in `release.yml` and `ci.yml` (tag plus digest; the jobs run `pacman -Syu` anyway)
+- the `archlinux:base-devel` container image in `release.yml`, `ci.yml` and `aur.yml` (tag plus digest; the jobs run `pacman -Syu` anyway)
+- AUR's ed25519 host key in `packaging/aur/publish.sh` (check it against the fingerprints on https://aur.archlinux.org)
 - actionlint (version and SHA-256 in `ci.yml`)
 - zizmor and cargo-llvm-cov (versions in `ci.yml`)
