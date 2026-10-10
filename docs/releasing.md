@@ -88,7 +88,7 @@ They conflict with each other. Their templates live in `packaging/aur/<package>/
 1. Fills in `pkgver`, `pkgrel` and `sha256sums`.
 2. Builds both packages with `makepkg` and checks them with `namcap` (an error fails the run).
 3. Installs each package and requires every shared library of `/usr/bin/ultra9000` to resolve.
-4. Only then, when `AUR_PUSH=true`, commits `PKGBUILD` and `.SRCINFO` to each AUR repository over SSH. AUR's host key is pinned in the script; no third-party action handles the key.
+4. Only then, when `AUR_PUSH=true`, commits `PKGBUILD` and `.SRCINFO` to each AUR repository over SSH. AUR's host key is pinned in the script; no third-party action handles the key. Before building, a publishing run checks that it can reach both AUR repositories with the key, so a missing key or `ssh` fails in seconds.
 
 It refuses to publish an older `pkgver-pkgrel` than the AUR has, or to change the contents of one that is already published. Re-running an unchanged release is a no-op.
 
@@ -241,15 +241,15 @@ To change it later, edit the file and `gh api -X PUT repos/yasen-pavlov/ultra_90
 
 | Job                 | Runs                                                                                                             | When                                                          |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `Detect changes`    | path filters (`native`: `src-tauri/`, `vendor/`, `ci.yml`; `packaging`)                                          | always                                                        |
+| `Detect changes`    | path filters (`native`: `src-tauri/`, `vendor/`, `ci.yml`; `arch`; `aur`)                                        | always                                                        |
 | `Frontend`          | `bun install --frozen-lockfile`, `check`, `lint`, `format:check`, `build`, `bun audit --audit-level=high`, Vitest with coverage (LCOV artifact) | always                  |
 | `Rust (Linux)`      | `cargo fmt --check`, `clippy --all-targets -D warnings`, app crate tests with coverage (LCOV artifact) including the GUI test under a headless sway (`WLR_BACKENDS=headless`, pixman) on a private session bus, tests `alacritty_embed`, `alacritty_terminal`, `vte-graphics` | pushes to `main`; PRs with native changes |
 | `Rust (macOS)`      | Clippy and the same tests on Apple Silicon, the GUI test in the runner's window server session (includes `drop_stops_foreground_job_ignoring_hangup`) | pushes to `main`; PRs with native changes                     |
 | `MSRV`              | `cargo check --all-targets` with the `rust-version` read from `src-tauri/Cargo.toml`                              | pushes to `main`; PRs with native changes                     |
 | `cargo-deny`        | advisories, licenses, bans, sources per `deny.toml`                                                              | always                                                        |
 | `Workflow lint`     | actionlint and zizmor on `.github/`                                                                              | always                                                        |
-| `Arch package`      | `packaging/arch/container-build.sh` (the release's makepkg path) in the pinned archlinux container, no upload    | only if packaging inputs changed (the `packaging` filter)      |
-| `AUR`               | `aur.yml` without publishing: builds and checks both AUR packages against the latest release                     | only if packaging inputs changed (the `packaging` filter)      |
+| `Arch package`      | `packaging/arch/container-build.sh` (the release's makepkg path) in the pinned archlinux container, no upload    | `arch` filter: what the release's Arch job reads (PKGBUILD, installed files, stamped versions, `Cargo.lock`, `release.yml`, `ci.yml`) |
+| `AUR`               | `aur.yml` without publishing: builds and checks both AUR packages against the latest release                     | `aur` filter: `packaging/aur/`, `packaging/arch/PKGBUILD` (the `depends` it must match), `aur.yml`, `ci.yml` |
 | `SonarQube Cloud`   | scan with the artifacts above                                                                                    | pushes and same-repository PRs (including Dependabot)         |
 | `CI ok`             | fails if any job above failed or was cancelled (skipped is fine)                                                 | always; required check                                        |
 

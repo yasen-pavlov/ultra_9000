@@ -51,8 +51,8 @@ jobs:
       group: ${{ inputs.publish && 'aur-publish' || format('aur-check-{0}', github.run_id) }}
       cancel-in-progress: false
     steps:
-      - name: Install git, jq and namcap
-        run: pacman -Syu --noconfirm --needed git jq namcap
+      - name: Install git, jq, namcap and OpenSSH
+        run: pacman -Syu --noconfirm --needed git jq namcap openssh
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
