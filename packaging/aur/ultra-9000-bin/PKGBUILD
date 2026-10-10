@@ -14,15 +14,24 @@ pkgdesc='Agent harness with native Alacritty terminals in a Tauri/Svelte interfa
 arch=('x86_64')
 url='https://github.com/yasen-pavlov/ultra_9000'
 license=('MIT OR Apache-2.0')
+# Every library the binary links directly, plus librsvg, libxkbcommon, mesa (EGL) and
+# wayland, which it loads at runtime (namcap reports those four as possibly unneeded).
 depends=(
+  'cairo'
   'dbus'
   'fontconfig'
   'freetype2'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
   'gtk3'
   'hicolor-icon-theme'
+  'libgcc'
   'librsvg'
+  'libsoup3'
   'libxkbcommon'
   'mesa'
+  'pango'
   'wayland'
   'webkit2gtk-4.1'
 )
