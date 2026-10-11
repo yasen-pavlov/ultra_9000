@@ -153,7 +153,10 @@ fn app() -> App {
             attach_terminal_host(&window)?;
             lifecycle::install_menu_bar_icon(app)?;
             #[cfg(target_os = "macos")]
-            menubar::create(app)?;
+            if let Err(error) = menubar::create(app) {
+                log::warn!("Menu-bar popover unavailable; keeping the native menu: {error}");
+                menubar::recover_menu_only(app.handle());
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -162,6 +165,22 @@ fn app() -> App {
 
 fn on_run_event(app: &AppHandle, event: RunEvent) {
     match event {
+        // Successful panel conversion is process-lifetime: ordinary close requests only
+        // dismiss it. Failed startup recovery uses destroy(), which bypasses this request.
+        #[cfg(target_os = "macos")]
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == menubar::WINDOW => {
+            api.prevent_close();
+            let app = app.clone();
+            macos::defer_on_main(Box::new(move || {
+                if let Err(error) = menubar::hide(&app) {
+                    log::warn!("popover close: {error}");
+                }
+            }));
+        }
         // No visible title bar or close button, but the OS can still ask to close (e.g.
         // Window > Close shortcuts from other tools): hide instead, keeping every session alive.
         RunEvent::WindowEvent {

@@ -412,7 +412,7 @@ pub fn show_window_with_activation<R: Runtime>(
 #[cfg(target_os = "macos")]
 pub fn toggle_main_inactive<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     use objc2::{rc::Retained, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSWindow};
+    use objc2_app_kit::{NSApplication, NSWindow, NSWindowOcclusionState};
     let mtm = MainThreadMarker::new().expect("inactive window toggle off main");
     let window = app
         .get_webview_window(MAIN_WINDOW)
@@ -427,7 +427,12 @@ pub fn toggle_main_inactive<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         )
     }
     .ok_or("main native window not found")?;
-    let shown = window_visible();
+    let shown = crate::menubar::toggle_hides_main(
+        native.isVisible(),
+        native
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible),
+    );
     if shown {
         workspace::invalidate_focus();
         native.orderOut(None);

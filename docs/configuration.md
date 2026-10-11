@@ -107,6 +107,8 @@ shells, exited items and seen turns do not add status segments. In the popover, 
 the main window without taking focus; n/t/e create rows without closing the panel;
 selecting a row, j or o brings the main window forward. Popover focus never marks a turn
 seen: only main-window keyboard focus does. Linux keeps its existing tray behaviour.
+If native popover setup is unsupported or fails, the app keeps running and left-click opens
+the existing menu instead; the failed window and its event registrations are removed.
 
 ### Control link
 
@@ -118,11 +120,17 @@ ultra9000 ctl select_item '{"itemId":"item-3"}'
 ultra9000 ctl jump_to_waiting
 ultra9000 ctl set_window_visible '{"visible":"toggle"}'
 ultra9000 ctl set_window_visible '{"visible":true,"activationToken":"<XDG_ACTIVATION_TOKEN>","desktopStartupId":"<DESKTOP_STARTUP_ID>"}' # activation fields optional
-ultra9000 ctl new_item '{"projectId":"/abs/project","kind":"shell"}'   # kind: agent | shell | neovim, optional tool
-ultra9000 ctl open_palette '{"projectId":"/abs/project"}'
+ultra9000 ctl new_item '{"projectId":"/abs/project","kind":"shell"}'   # kind: agent | shell | neovim; projectId and tool optional
+ultra9000 ctl new_item '{"kind":"agent"}' # omitted projectId uses the launch-default directory/tool
+ultra9000 ctl open_palette '{"projectId":"/abs/project","mode":"new"}' # projectId optional; mode open (default) | new
 ultra9000 ctl close_item '{"itemId":"item-3","confirmed":false}'
 ultra9000 ctl request_quit
 ```
+
+`new_item {projectId?, kind, tool?}` launches in a listed project's root, or in the app's
+launch-default directory when `projectId` is omitted; neither path shows the main window.
+`open_palette {projectId?, mode?}` opens the main window's palette in `open` mode by default;
+`mode: "new"` opens the project's new-item picker, as its sidebar + does.
 
 `watch` prints a `snapshot` of the sidebar (projects and items in sidebar order with their state, no icons) at once and after every change, a `ping` every 5 s, and `{"type":"disconnected"}` once whenever no app is running or the app goes away; it reconnects every 1 s, backing off to 10 s. A one-shot command prints its `reply` and exits 0 if it succeeded, 1 if not, or 2 when no app is running (printing `{"type":"disconnected"}`) or the arguments are not a JSON object. `close_item` follows the app's close rules but never opens the app's confirmation; it answers `"result":"needs-confirmation"` with a `reason` instead, and `"confirmed":true` closes. The newest running instance is used; `ULTRA9000_CONTROL_SOCKET=<path>` picks a socket explicitly. Inside the macOS bundle the binary is `Ultra 9000.app/Contents/MacOS/ultra9000`.
 

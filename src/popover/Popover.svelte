@@ -22,7 +22,7 @@
   } from "../lib/native";
   import { settings } from "../lib/settings.svelte";
   import { workspace } from "../lib/workspace.svelte";
-  import { PopoverController } from "./controller.svelte";
+  import { PopoverController, rowStop } from "./controller.svelte";
   import { popoverKey } from "./keys";
   import RowConfirm from "./RowConfirm.svelte";
 
@@ -35,6 +35,7 @@
   let below = $state<string[]>([]);
   let listenError = $state<string | null>(null);
   let sentHeight = 0;
+  const uid = $props.id();
 
   const snapshot = $derived(workspace.state);
   const selectedId = $derived(snapshot?.activeItemId ?? null);
@@ -54,17 +55,17 @@
   const needsYou = $derived(workspace.needsYouCount);
   const waiting = $derived(workspace.waiting.length);
 
-  const controller = new PopoverController(() => ({ rows, selectedId, waitingCount: waiting }), {
-    command: popoverCommand,
-    hide: popoverHide,
-    toggleMain: popoverToggleMain,
-    reveal: focusRow,
-  });
-
-  /** The list's single tab stop: the ring's row, else the main window's item, else the first. */
-  const tabStop = $derived(
-    controller.focusId ?? (rows.some((row) => row.id === selectedId) ? selectedId : null) ?? rows[0]?.id ?? null,
+  const controller = new PopoverController(
+    () => ({
+      groups: groups.map((group) => ({ projectId: group.project.id, items: group.items })),
+      selectedId,
+      waitingCount: waiting,
+    }),
+    { command: popoverCommand, hide: popoverHide, toggleMain: popoverToggleMain, reveal: focusStop },
   );
+
+  /** The list's single tab stop: the ring's stop, else where the first key would put it. */
+  const tabStop = $derived(controller.focus ?? controller.entry());
   const footer = $derived(
     controller.error !== null
       ? "error"
@@ -105,14 +106,14 @@
 
   // Every snapshot: drop a question whose row ended, hand the ring on, focus a row started here.
   $effect(() => {
-    void rows;
+    void groups;
     untrack(() => controller.sync());
   });
 
-  // The ring follows the controller's focus (keys, a vanished row's neighbour, a new row).
+  // DOM focus follows the controller's (keys, a vanished stop's neighbour, a new row).
   $effect(() => {
-    const id = controller.focusId;
-    if (id !== null && controller.question === null) untrack(() => focusRow(id));
+    const stop = controller.focus;
+    if (stop !== null && controller.question === null) untrack(() => focusStop(stop));
   });
 
   /** Shown: no ring until the first key; scroll to the main window's item, or the top. */
@@ -132,14 +133,13 @@
     });
   }
 
-  /** Scroll a row into view and give it DOM focus, which draws SidebarRow's ring. */
-  function focusRow(itemId: string): void {
+  /** Scroll a stop into view and give it DOM focus (Tab order, screen readers). The ring itself is
+   *  drawn from the controller's state, so it shows after pointer actions on any WebKit. */
+  function focusStop(stop: string): void {
     void tick().then(() => {
-      if (listEl === null) return;
-      const id = CSS.escape(itemId);
-      listEl.querySelector(`[data-item-id="${id}"]`)?.scrollIntoView({ block: "nearest" });
-      const options: FocusOptions & { focusVisible?: boolean } = { preventScroll: true, focusVisible: true };
-      listEl.querySelector<HTMLElement>(`[data-rove="row:${id}"]`)?.focus(options);
+      const element = listEl?.querySelector<HTMLElement>(`[data-rove="${CSS.escape(stop)}"]`);
+      element?.scrollIntoView({ block: "nearest" });
+      element?.focus({ preventScroll: true });
     });
   }
 
@@ -184,16 +184,22 @@
     if (event.defaultPrevented) return;
     const key = popoverKey(event);
     if (key === null) return;
-    // Enter on a header, footer or question button activates that button.
+    // Enter on a button that is not the ring's stop (header, footer, question) activates that
+    // button; a held Enter is still swallowed so it never activates it again.
     const target = event.target;
-    if (key.kind === "enter" && target instanceof HTMLButtonElement && target.dataset.rove?.startsWith("row:") !== true)
+    if (
+      key.kind === "enter" &&
+      !event.repeat &&
+      target instanceof HTMLButtonElement &&
+      target.dataset.rove !== controller.focus
+    )
       return;
-    if (controller.key(key)) event.preventDefault();
+    if (controller.key(key, event.repeat)) event.preventDefault();
   }
 
   function onfocusin(event: FocusEvent): void {
     const rove = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-rove]")?.dataset.rove;
-    if (rove?.startsWith("row:") === true) controller.focused(rove.slice(4));
+    if (rove !== undefined) controller.focused(rove);
   }
 </script>
 
@@ -271,46 +277,58 @@
           </div>
         </div>
       {:else}
-        {#each groups as group (group.project.id)}
+        {#each groups as group, index (group.project.id)}
           {@const project = group.project}
-          <ProjectHead
-            {project}
-            items={group.items}
-            roveKey={null}
-            onnew={() => controller.palette({ id: project.id, mode: "new" })}
-          />
-          {#if project.missing}
-            <div class="pempty missing">Folder missing · {tildePath(project.path, home)}</div>
-          {:else if group.items.length === 0}
-            <div class="pempty">Nothing running · + to start</div>
-          {/if}
-          {#each group.items as item (item.id)}
-            {#if controller.question?.itemId === item.id}
-              <RowConfirm
-                {item}
-                reason={controller.question.reason}
-                onkeep={() => controller.cancel()}
-                onend={() => controller.confirm()}
-              />
-            {:else}
-              {@const view = itemView(item, { tool: workspace.tool(item.tool), now: clock.now, home })}
-              {@const dis = workspace.disambiguation.get(item.id) ?? ""}
-              <SidebarRow
-                {item}
-                {view}
-                {dis}
-                label="{view.title}{dis}, {project.name}, {workspace.toolLabel(item.tool)}, {view.stateText}"
-                selected={item.id === selectedId}
-                {compact}
-                rovable={tabStop === item.id}
-                onselect={() => controller.select(item.id)}
-                onclose={() => {
-                  controller.focused(item.id);
-                  void controller.close(item.id);
-                }}
-              />
+          {@const labelId = `${uid}-project-${index}`}
+          <div class="grp" role="group" aria-labelledby={labelId}>
+            <ProjectHead
+              {project}
+              items={group.items}
+              roveKey={tabStop}
+              {labelId}
+              onnew={() => controller.palette({ id: project.id, mode: "new" })}
+            />
+            {#if project.missing}
+              <div class="pempty missing">Folder missing · {tildePath(project.path, home)}</div>
+            {:else if group.items.length === 0}
+              <div class="pempty">Nothing running · + to start</div>
             {/if}
-          {/each}
+            {#if group.items.length > 0}
+              <div class="rows" role="list" aria-labelledby={labelId}>
+                {#each group.items as item (item.id)}
+                  <div role="listitem">
+                    {#if controller.question?.itemId === item.id}
+                      <RowConfirm
+                        {item}
+                        reason={controller.question.reason}
+                        onkeep={() => controller.cancel()}
+                        onend={() => controller.confirm()}
+                      />
+                    {:else}
+                      {@const view = itemView(item, { tool: workspace.tool(item.tool), now: clock.now, home })}
+                      {@const dis = workspace.disambiguation.get(item.id) ?? ""}
+                      {@const stop = rowStop(item.id)}
+                      <SidebarRow
+                        {item}
+                        {view}
+                        {dis}
+                        label="{view.title}{dis}, {project.name}, {workspace.toolLabel(item.tool)}, {view.stateText}"
+                        selected={item.id === selectedId}
+                        {compact}
+                        rovable={tabStop === stop}
+                        ring={controller.focus === stop}
+                        onselect={() => controller.select(item.id)}
+                        onclose={() => {
+                          controller.focused(stop);
+                          void controller.close(item.id);
+                        }}
+                      />
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
         {/each}
       {/if}
     </div>
@@ -423,6 +441,17 @@
   .plist {
     flex: 1;
     min-height: 0;
+  }
+  /* Semantic wrappers only: the project heads, empty lines and rows lay out as one flat column,
+     as in the sidebar (the 10 px gap above every project head but the first). */
+  .grp,
+  .rows {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+  }
+  .inner .grp + .grp > :global(.proj) {
+    margin-top: 10px;
   }
   .inner {
     padding: 0 8px 6px;

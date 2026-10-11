@@ -107,7 +107,32 @@ fn auto_hidden_menu_bar_uses_actual_status_window_and_visible_frame() {
         visible(),
         400.,
     );
+    assert_eq!(frame.y + frame.height, 834.);
+}
+
+#[test]
+fn revealed_auto_hide_or_full_screen_bar_anchors_below_status_window_not_screen_top() {
+    // visibleFrame includes the entire display while an auto-hidden/full-screen menu bar
+    // is revealed. The status window's lower edge is the real exclusion boundary.
+    let entire_screen = Rect {
+        height: 900.,
+        ..visible()
+    };
+    let frame = anchored_frame(button(), entire_screen, 400.);
     assert_eq!(frame.y + frame.height, 869.);
+    assert_eq!(frame.y + frame.height + 6., button().y);
+    let notch_screen = Rect {
+        y: -200.,
+        height: 1100.,
+        ..visible()
+    };
+    let notch_button = Rect {
+        y: 862.,
+        height: 38.,
+        ..button()
+    };
+    let frame = anchored_frame(notch_button, notch_screen, 400.);
+    assert_eq!(frame.y + frame.height, 856.);
 }
 
 #[test]
@@ -271,4 +296,187 @@ fn visual_title_key_ignores_running_and_exact_capped_or_unread_totals() {
         }
         .title_key()
     );
+}
+
+#[test]
+fn unsupported_panel_and_partial_startup_preserve_a_menu_only_app() {
+    assert!(panel_compatibility(128, 128, true).is_ok());
+    assert!(panel_compatibility(128, 120, true).is_ok());
+    assert_eq!(
+        panel_compatibility(128, 129, true).unwrap_err(),
+        "AppKit panel layout is larger than the Tauri window allocation"
+    );
+    assert_eq!(
+        panel_compatibility(128, 128, false).unwrap_err(),
+        "AppKit does not support nonactivating panel conversion"
+    );
+    assert!(panel_compatibility(128, 129, false).is_err());
+    assert_eq!(
+        startup_policy(true, true),
+        StartupPolicy {
+            menu_on_left_click: false,
+            destroy_popover: false
+        }
+    );
+    assert_eq!(
+        startup_policy(false, true),
+        StartupPolicy {
+            menu_on_left_click: true,
+            destroy_popover: true
+        }
+    );
+    assert_eq!(
+        startup_policy(false, false),
+        StartupPolicy {
+            menu_on_left_click: true,
+            destroy_popover: false
+        }
+    );
+}
+
+#[test]
+fn status_clicks_toggle_and_context_clicks_preserve_system_dragging() {
+    use ClickRoute::*;
+    use MouseButton::*;
+    use MousePhase::*;
+    let route = |button, phase, control, command, open| {
+        click_route(ClickTarget::Status, button, phase, control, command, open)
+    };
+    assert_eq!(route(Left, Down, false, false, false), Show);
+    assert_eq!(route(Left, Down, false, false, true), Hide);
+    assert_eq!(route(Left, Up, false, false, true), RestoreHighlight);
+    assert_eq!(route(Left, Down, true, false, true), ContextDown);
+    assert_eq!(route(Left, Up, true, false, false), ContextUp);
+    assert_eq!(route(Right, Down, false, false, true), Dismiss);
+    assert_eq!(route(Right, Down, true, false, false), Pass);
+    assert_eq!(route(Right, Up, false, false, true), Pass);
+    assert_eq!(route(Other, Down, false, false, true), Pass);
+    for button in [Left, Right, Other] {
+        for phase in [Down, Up] {
+            for open in [false, true] {
+                for control in [false, true] {
+                    assert_eq!(
+                        route(button, phase, control, true, open),
+                        Pass,
+                        "Cmd-drag is native"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn outside_mouse_down_dismisses_only_an_open_panel_not_inside_events_or_mouse_up() {
+    for button in [MouseButton::Left, MouseButton::Right, MouseButton::Other] {
+        for phase in [MousePhase::Down, MousePhase::Up] {
+            for open in [false, true] {
+                assert_eq!(
+                    click_route(ClickTarget::Panel, button, phase, false, false, open),
+                    ClickRoute::Pass
+                );
+                let expected = if open && phase == MousePhase::Down {
+                    ClickRoute::Dismiss
+                } else {
+                    ClickRoute::Pass
+                };
+                assert_eq!(
+                    click_route(ClickTarget::Other, button, phase, true, true, open),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn inactive_toggle_raises_hidden_or_covered_windows_and_hides_a_visible_one() {
+    assert!(!toggle_hides_main(false, false));
+    assert!(!toggle_hides_main(false, true));
+    assert!(!toggle_hides_main(true, false));
+    assert!(toggle_hides_main(true, true));
+}
+
+#[test]
+fn appearance_palette_and_components_keep_exact_approved_contrast_colors() {
+    assert_eq!(Tone::Purple.color(true), 0xc792ea);
+    assert_eq!(Tone::Purple.color(false), 0x7443a8);
+    assert_eq!(Tone::Error.color(true), 0xff8da1);
+    assert_eq!(Tone::Error.color(false), 0xa8172f);
+    assert_eq!(color_components(0, 1.), [0., 0., 0., 1.]);
+    assert_eq!(color_components(0xffffff, 0.35), [1., 1., 1., 0.35]);
+    assert_eq!(color_components(0xff9800, 1.), [1., 152. / 255., 0., 1.]);
+}
+
+#[test]
+fn pill_metrics_cap_width_and_keep_one_device_pixel_inside_light_bar_edge() {
+    for (text, width) in [("1", 22.), ("99", 29.), ("99+", 36.)] {
+        let dark = pill_geometry(text, true, 2.);
+        assert_eq!(
+            dark.frame,
+            Rect {
+                x: 0.,
+                y: 0.,
+                width,
+                height: 16.
+            }
+        );
+        assert_eq!(dark.radius, 8.);
+        assert_eq!((dark.text_x, dark.baseline_y), (9.5, 12.));
+        assert!(dark.edge.is_none());
+        for scale in [1., 2.] {
+            let edge = pill_geometry(text, false, scale).edge.unwrap();
+            assert_eq!(edge.thickness * scale, 1.);
+            assert_eq!(edge.frame.x, edge.thickness / 2.);
+            assert_eq!(edge.frame.width + edge.thickness, width);
+            assert_eq!(edge.frame.height + edge.thickness, 16.);
+            assert_eq!(edge.radius + edge.thickness / 2., 8.);
+        }
+    }
+    assert_eq!(pill_geometry("1", false, 0.).edge.unwrap().thickness, 1.);
+}
+
+#[test]
+fn attachment_layout_matches_native_title_baselines_and_kern() {
+    let spacer = attachment_layout(&Run::Spacer(6.)).unwrap();
+    assert_eq!(
+        spacer.bounds,
+        Rect {
+            x: 0.,
+            y: 0.,
+            width: 6.,
+            height: 0.
+        }
+    );
+    assert_eq!(spacer.kern, 0.);
+    let pill = attachment_layout(&Run::Pill("99+".into())).unwrap();
+    assert_eq!(
+        pill.bounds,
+        Rect {
+            x: 0.,
+            y: -3.5,
+            width: 36.,
+            height: 16.
+        }
+    );
+    assert_eq!(pill.kern, 0.);
+    for run in [Run::Arc, Run::Ring] {
+        let layout = attachment_layout(&run).unwrap();
+        assert_eq!(
+            layout.bounds,
+            Rect {
+                x: 0.,
+                y: -1.5,
+                width: 12.,
+                height: 12.
+            }
+        );
+        assert_eq!(layout.kern, 3.);
+    }
+    assert!(attachment_layout(&Run::Text {
+        text: "×".into(),
+        tone: Tone::Error,
+        kern_after: 3.
+    })
+    .is_none());
 }

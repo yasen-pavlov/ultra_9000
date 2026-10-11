@@ -11,6 +11,7 @@
     items,
     folded = false,
     roveKey,
+    labelId,
     onfold,
     onnew,
   }: {
@@ -18,6 +19,8 @@
     items: ItemState[];
     folded?: boolean;
     roveKey: string | null;
+    /** id of the project name, so a surrounding group can be labelled by it. */
+    labelId?: string;
     /** Absent: the header does not fold. */
     onfold?: () => void;
     onnew: () => void;
@@ -39,7 +42,7 @@
 
 <div class="proj" class:folded>
   {#if onfold === undefined}
-    <span class="head" title={project.path}><span class="nm">{project.name}</span>{@render path()}</span>
+    <span class="head" title={project.path}><span class="nm" id={labelId}>{project.name}</span>{@render path()}</span>
   {:else}
     <button
       type="button"
@@ -56,7 +59,7 @@
       {:else}
         <span class="fold"><Icon name={folded ? "chevron-right" : "chevron-down"} small /></span>
       {/if}
-      <span class="nm">{project.name}</span>
+      <span class="nm" id={labelId}>{project.name}</span>
       {#if folded}
         <span class="agg">
           <span class="pill mute">{items.length}</span>

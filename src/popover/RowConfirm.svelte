@@ -12,6 +12,7 @@
     $props();
 
   let keep = $state<HTMLButtonElement | null>(null);
+  const uid = $props.id();
 
   const view = $derived(
     itemView(item, { tool: workspace.tool(item.tool), now: clock.now, home: workspace.state?.defaultCwd ?? "" }),
@@ -32,14 +33,15 @@
   });
 </script>
 
-<div class="conf" role="alertdialog" aria-label={question.title} data-item-id={item.id}>
+<!-- Inline in the list, not modal: the rest of the popover stays usable. -->
+<div class="conf" role="alertdialog" aria-labelledby="{uid}-title" aria-describedby="{uid}-why" data-item-id={item.id}>
   <div class="top">
     <span class="tile-at"
       ><ToolTile tool={item.tool} model={item.model} badge={view.badge} badgeGlyph={view.badgeGlyph} /></span
     >
     <span class="tx">
-      <span class="q">{question.title}</span>
-      <span class="why">
+      <span class="q" id="{uid}-title">{question.title}</span>
+      <span class="why" id="{uid}-why">
         {#each question.body as paragraph, index (index)}<span class="para"
             >{#each paragraph.parts as part, at (at)}{#if part.strong}<b>{part.text}</b
                 >{:else}{part.text}{/if}{/each}</span

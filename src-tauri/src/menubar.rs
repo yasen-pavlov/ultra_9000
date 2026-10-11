@@ -5,9 +5,15 @@ use serde::Serialize;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{create, hide, is_popover_window, set_height, update_menu_bar_title};
+pub use macos::{
+    create, hide, is_popover_window, recover_menu_only, set_height, update_menu_bar_title, WINDOW,
+};
+#[cfg(any(target_os = "macos", test))]
+mod behavior;
 #[cfg(target_os = "macos")]
 mod render;
+#[cfg(any(target_os = "macos", test))]
+pub use behavior::*;
 
 /// Same payload as a control-link reply, without transport-only `type` and `id` fields.
 /// Close confirmation is a successful reply with `result: "needs-confirmation"` and `reason`.
@@ -56,12 +62,15 @@ pub struct Rect {
     pub height: f64,
 }
 
-/// Left-align to the clicked status button; preserve the top six points below its screen's
-/// visible menu-bar edge. Eight-point margins and the screen win over the design minimum.
+/// Left-align to the clicked status button, six points below both its actual lower edge
+/// and the visible screen's menu-bar edge (auto-hidden/full-screen bars overlap visibleFrame).
 #[cfg(any(target_os = "macos", test))]
 pub fn anchored_frame(button: Rect, visible: Rect, requested_height: f64) -> Rect {
     let margin = 8_f64.min(visible.width.max(0.) / 2.);
-    let top = visible.y + visible.height - 6_f64.min(visible.height.max(0.));
+    let anchor = (visible.y + visible.height.max(0.))
+        .min(button.y)
+        .max(visible.y);
+    let top = anchor - 6_f64.min((anchor - visible.y).max(0.));
     let available_height = (top - visible.y - 8.).max(0.);
     let height = if requested_height.is_finite() {
         requested_height.clamp(MIN_HEIGHT, MAX_HEIGHT)
