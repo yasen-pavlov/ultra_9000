@@ -67,11 +67,27 @@ fn start_prepares_a_private_runtime_dir_extension_and_socket() {
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
     // A token file of another instance sharing the directory is left alone.
     fs::write(runtime.join("omp-token-0123"), "other").unwrap();
+    // Files of an instance that still runs stay; those of one that is gone are removed.
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let live = std::os::unix::process::parent_id();
+    let instance = |pid: u32| {
+        [
+            runtime.join(format!("omp-{pid}.sock")),
+            runtime.join(format!("ultra9000-status-{pid}.ts")),
+        ]
+    };
+    for file in instance(dead).iter().chain(&instance(live)) {
+        fs::write(file, "").unwrap();
+    }
     let link = Link::start(&runtime, |_| {}).unwrap();
     assert_eq!(
         fs::read_to_string(runtime.join("omp-token-0123")).unwrap(),
         "other"
     );
+    assert!(instance(dead).iter().all(|f| !f.exists()));
+    assert!(instance(live).iter().all(|f| f.exists()));
 
     let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&runtime), 0o700);
