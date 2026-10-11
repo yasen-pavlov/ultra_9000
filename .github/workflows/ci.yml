@@ -276,7 +276,8 @@ jobs:
         env:
           U9K_REQUIRE_GUI_TESTS: "1"
         run: |
-          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --lcov --output-path lcov-macos.info \
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked \
+            --features tauri/custom-protocol --lcov --output-path lcov-macos.info \
             --ignore-filename-regex '/(tests|test_support)\.rs$|/src-tauri/tests/'
           cargo llvm-cov report --manifest-path src-tauri/Cargo.toml --summary-only \
             --ignore-filename-regex '/(tests|test_support)\.rs$|/src-tauri/tests/'
