@@ -172,6 +172,10 @@ pub(crate) fn deliver(key: SessionKey, event: embed::HostEvent<'_>) {
     host_event(key, event);
     flush_host_events();
 }
+/// One foreground-job poll, as the app's 1 s timer runs it.
+pub(crate) fn poll_foreground_jobs() {
+    poll_jobs();
+}
 impl Host for FakeHost {
     fn publish(&self, state: WorkspaceState) {
         self.published.borrow_mut().push(state);

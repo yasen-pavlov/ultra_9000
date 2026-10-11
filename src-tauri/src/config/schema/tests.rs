@@ -223,6 +223,12 @@ fn choice_text_and_boolean_settings_validate_their_type() {
             "expected light | dark",
         ),
         (
+            &["tray", "show"],
+            "'never'",
+            "'dark'",
+            "expected auto | always | never",
+        ),
+        (
             &["layout", "context_bar"],
             "'always'",
             "'sometimes'",

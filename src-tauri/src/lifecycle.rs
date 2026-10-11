@@ -186,16 +186,22 @@ fn tray_menu<R: Runtime>(app: &AppHandle<R>, model: &TrayModel) -> tauri::Result
 fn menu_label(label: &str, shortcut: Option<&str>) -> String {
     shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}    {key}"))
 }
-fn model(state: &WorkspaceState) -> TrayModel {
-    let visible = WINDOW_SHOWN.load(Ordering::Acquire);
+/// Whether the app's window is shown, as the tray and the shell control link report it.
+pub fn window_visible() -> bool {
     #[cfg(target_os = "macos")]
-    let visible = visible && !platform::application_hidden();
+    let hidden = platform::application_hidden();
+    #[cfg(target_os = "linux")]
+    let hidden = false;
+    WINDOW_SHOWN.load(Ordering::Acquire) && !hidden
+}
+fn model(state: &WorkspaceState) -> TrayModel {
     let mut model = TrayModel::build(
         state,
-        visible,
+        window_visible(),
         workspace::notify_needs_you().unwrap_or(false),
     );
     model.dark_icon = workspace::tray_dark_icon().unwrap_or(false);
+    model.icon_shown = crate::control::tray_icon_shown(workspace::tray_show().unwrap_or_default());
     #[cfg(target_os = "macos")]
     if let Ok(app) = workspace::app_handle() {
         // Coloured attention images must follow the menu bar's actual appearance.
@@ -233,6 +239,7 @@ pub fn install_menu_bar_icon(app: &App) -> tauri::Result<()> {
             .menu(&menu)
             .show_menu_on_left_click(true)
             .build(app)?;
+        tray.set_visible(model.icon_shown)?;
         app.manage(MenuBarIcon(tray));
     }
     TRAY_MODEL.with(|cache| *cache.borrow_mut() = Some(model));
@@ -252,6 +259,7 @@ pub fn update_tray<R: Runtime>(app: &AppHandle<R>, state: &WorkspaceState) {
             tray.0.set_tooltip(Some(&model.tooltip))?;
             tray.0.set_icon(Some(macos_tray_image(&model)?))?;
             tray.0.set_icon_as_template(!model.attention())?;
+            tray.0.set_visible(model.icon_shown)?;
             Ok::<(), tauri::Error>(())
         })();
         if let Err(error) = result {
@@ -264,6 +272,8 @@ pub fn update_tray<R: Runtime>(app: &AppHandle<R>, state: &WorkspaceState) {
 pub fn refresh_tray<R: Runtime>(app: &AppHandle<R>) {
     if let Ok(state) = workspace::snapshot() {
         update_tray(app, &state);
+        // Window visibility is not workspace state; the shell control link reports it too.
+        crate::control::publish(&state);
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

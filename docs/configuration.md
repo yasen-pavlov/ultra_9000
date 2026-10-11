@@ -73,6 +73,32 @@ icon = "icons/provider.png" # overrides the built-in provider mark, always mono
 
 Icon files resolve relative to the config directory. SVG/PNG content is validated regardless of extension, at most 256 KB; absolute paths, `..`, non-files and symlinks outside the config directory are rejected. Missing/invalid icons fall back without blocking launch and show a per-file settings error; editing or adding an icon hot-reloads it. Resolution is valid user file → built-in tool mark → configured glyph → generic agent mark. Tool identity is not replaced by the model: the old icon-mode key is removed, with no compatibility alias.
 
+## Tray icon and shell plugins
+
+```toml
+[tray]
+show = "auto" # auto (default) | always | never
+```
+
+`never` removes the tray icon (Linux StatusNotifierItem, macOS menu-bar item) and `always` keeps it. `auto` shows it except while a desktop-shell plugin watches the app over the control link below: the icon is withdrawn when the first watcher connects and returns 5 s after the last one disconnects, so a crashed or removed plugin never leaves a hidden window without a way back. Changes apply live.
+
+### Control link
+
+The running app listens on a private local socket (`control-<pid>.sock` next to the OMP status link: `$XDG_RUNTIME_DIR/ultra-9000/` on Linux, the per-user temp directory on macOS) that a shell plugin such as Noctalia's `muty/ultra9000` uses through the app's own command-line client, which never starts the app:
+
+```sh
+ultra9000 ctl watch [--client NAME]       # prints the app's lines (newline-delimited JSON) until stdout closes
+ultra9000 ctl select_item '{"itemId":"item-3"}'
+ultra9000 ctl jump_to_waiting
+ultra9000 ctl set_window_visible '{"visible":"toggle"}'
+ultra9000 ctl new_item '{"projectId":"/abs/project","kind":"shell"}'   # kind: agent | shell | neovim, optional tool
+ultra9000 ctl open_palette '{"projectId":"/abs/project"}'
+ultra9000 ctl close_item '{"itemId":"item-3","confirmed":false}'
+ultra9000 ctl request_quit
+```
+
+`watch` prints a `snapshot` of the sidebar (projects and items in sidebar order with their state, no icons) at once and after every change, a `ping` every 5 s, and `{"type":"disconnected"}` once whenever no app is running or the app goes away; it reconnects every 1 s, backing off to 10 s. A one-shot command prints its `reply` and exits 0 if it succeeded, 1 if not, or 2 when no app is running (printing `{"type":"disconnected"}`) or the arguments are not a JSON object. `close_item` follows the app's close rules but never opens the app's confirmation; it answers `"result":"needs-confirmation"` with a `reason` instead, and `"confirmed":true` closes. The newest running instance is used; `ULTRA9000_CONTROL_SOCKET=<path>` picks a socket explicitly. Inside the macOS bundle the binary is `Ultra 9000.app/Contents/MacOS/ultra9000`.
+
 ## Provider resolution
 
 The provider mark shows the model's maker, not the route it runs through. Resolution order:

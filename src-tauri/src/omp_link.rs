@@ -404,17 +404,14 @@ fn read_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> bool {
 }
 
 /// Create `dir` with mode 0700, or accept an existing directory only if this user owns it and
-/// nobody else may use it.
-fn private_dir(dir: &Path) -> Result<(), String> {
+/// nobody else may use it. Shared with the control link (`control.rs`).
+pub(crate) fn private_dir(dir: &Path) -> Result<(), String> {
     match DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(format!("cannot create {}: {e}", dir.display())),
     }
-    let meta = fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+    if !is_private_dir(dir) {
         return Err(format!(
             "{} is not a private directory of this user",
             dir.display()
@@ -423,7 +420,18 @@ fn private_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove the socket and extension of instances whose process is gone (killed or crashed
+/// Whether `dir` is an existing directory (not a symlink) that this user owns and nobody else
+/// may use. The control link's CLI trusts no socket outside such a directory.
+pub(crate) fn is_private_dir(dir: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0
+}
+
+/// Remove the sockets and extension of instances whose process is gone (killed or crashed
 /// before their own cleanup). A reused pid only keeps an old file, never removes a live one.
 fn remove_dead_instances(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -434,24 +442,35 @@ fn remove_dead_instances(dir: &Path) {
         let Some(pid) = name.to_str().and_then(instance_pid) else {
             continue;
         };
-        // SAFETY: signal 0 only checks that the process exists; nothing is delivered.
-        let gone = unsafe { libc::kill(pid, 0) } != 0
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-        if gone {
+        if !process_alive(pid) {
             let _ = fs::remove_file(entry.path());
         }
     }
 }
 
-/// The app pid in an instance's file name: `omp-<pid>.sock` or `ultra9000-status-<pid>.ts`.
+/// Whether process `pid` may still exist; only a definite "no such process" counts as gone.
+pub(crate) fn process_alive(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks that the process exists; nothing is delivered.
+    let signalled = unsafe { libc::kill(pid, 0) } == 0;
+    signalled || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// The app pid in an instance's file name: `omp-<pid>.sock`, `control-<pid>.sock` or
+/// `ultra9000-status-<pid>.ts`.
 fn instance_pid(name: &str) -> Option<libc::pid_t> {
     let digits = name
         .strip_prefix("omp-")
         .and_then(|rest| rest.strip_suffix(".sock"))
+        .or_else(|| crate::control::socket_pid_digits(name))
         .or_else(|| {
             name.strip_prefix(EXTENSION_PREFIX)
                 .and_then(|rest| rest.strip_suffix(".ts"))
         })?;
+    pid_from_digits(digits)
+}
+
+/// A positive pid written as plain decimal digits.
+pub(crate) fn pid_from_digits(digits: &str) -> Option<libc::pid_t> {
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -484,8 +503,8 @@ fn random_hex() -> std::io::Result<String> {
 }
 
 /// Linux: `$XDG_RUNTIME_DIR/ultra-9000`, else a per-user directory in the temp dir; macOS:
-/// the per-user `$TMPDIR`.
-fn runtime_dir() -> PathBuf {
+/// the per-user `$TMPDIR`. Shared with the control link and its CLI client.
+pub(crate) fn runtime_dir() -> PathBuf {
     #[cfg(target_os = "linux")]
     {
         if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR")

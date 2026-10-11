@@ -57,6 +57,16 @@ pub struct ProjectOverride {
     pub name: Option<String>,
     pub default_tool: Option<String>,
 }
+/// `[tray] show`: whether the app's tray / menu-bar icon is shown. `auto` hands the icon over
+/// to a connected shell plugin (a `watch` client of the control link).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrayShow {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub default_tool: String,
@@ -65,6 +75,7 @@ pub struct Settings {
     pub sidebar_provider_mark: String,
     pub brand_color: String,
     pub tray_icon: String,
+    pub tray_show: TrayShow,
     pub provider_icons: BTreeMap<String, String>,
     pub sidebar_auto_collapse_below: u32,
     pub context_bar: String,
@@ -89,6 +100,7 @@ impl Default for Settings {
             sidebar_provider_mark: "corner".into(),
             brand_color: "all".into(),
             tray_icon: "light".into(),
+            tray_show: TrayShow::Auto,
             provider_icons: BTreeMap::new(),
             sidebar_auto_collapse_below: 800,
             context_bar: "auto".into(),
@@ -294,6 +306,7 @@ pub(crate) fn defaults() -> BTreeMap<Vec<String>, toml::Value> {
         ("sidebar.provider_mark", "corner".into()),
         ("icons.brand_color", "all".into()),
         ("tray.icon", "light".into()),
+        ("tray.show", "auto".into()),
         ("sidebar.auto_collapse_below", 800.into()),
         ("layout.context_bar", "auto".into()),
         ("notify.needs_you", true.into()),
@@ -344,6 +357,10 @@ pub(crate) fn validate(path: &[String], v: &toml::Value) -> Result<(), String> {
             "all | pickers | launch | off",
         ),
         "tray.icon" => (enum_is(&["light", "dark"]), "light | dark"),
+        "tray.show" => (
+            enum_is(&["auto", "always", "never"]),
+            "auto | always | never",
+        ),
         "sidebar.auto_collapse_below" => (range(0, 10000), "integer 0–10000"),
         "layout.context_bar" => (
             enum_is(&["auto", "always", "never"]),

@@ -5,8 +5,9 @@ use crate::{
 };
 use ksni::{
     menu::{CheckmarkItem, StandardItem},
-    Icon, MenuItem, Status, ToolTip, TrayMethods,
+    Handle, Icon, MenuItem, Status, ToolTip, TrayMethods,
 };
+use std::sync::Arc;
 use tauri::{image::Image, AppHandle, Manager, Runtime};
 use tokio::sync::watch;
 
@@ -14,8 +15,8 @@ struct LinuxTray {
     /// Dispatches a chosen menu/tray action (production: `lifecycle::handle_tray_action`).
     on_action: Box<dyn Fn(TrayAction) + Send>,
     model: TrayModel,
-    light: IconSet,
-    dark: IconSet,
+    light: Arc<IconSet>,
+    dark: Arc<IconSet>,
 }
 
 struct IconSet {
@@ -202,34 +203,60 @@ fn icon_sets() -> tauri::Result<(IconSet, IconSet)> {
 
 pub fn install(app: &AppHandle, model: TrayModel) -> tauri::Result<()> {
     let (light, dark) = icon_sets()?;
+    let (light, dark) = (Arc::new(light), Arc::new(dark));
     let mut rx = register(app, model.clone());
     let app = app.clone();
-    let tray = LinuxTray {
-        on_action: Box::new(move |action| lifecycle::handle_tray_action(&app, action)),
-        model,
-        light,
-        dark,
+    let tray = move |model: TrayModel| {
+        let app = app.clone();
+        LinuxTray {
+            on_action: Box::new(move |action| lifecycle::handle_tray_action(&app, action)),
+            model,
+            light: light.clone(),
+            dark: dark.clone(),
+        }
     };
     tauri::async_runtime::spawn(async move {
-        // Stay registered even if the desktop's watcher starts after the application.
-        let handle = match tray.assume_sni_available(true).spawn().await {
-            Ok(handle) => handle,
-            Err(error) => {
-                log::warn!("StatusNotifierItem: {error}");
-                return;
+        let mut model = model;
+        let mut handle: Option<Handle<LinuxTray>> = None;
+        // A registration that failed is retried only after the icon was withdrawn once.
+        let mut failed = false;
+        loop {
+            match handle.take() {
+                // Withdrawn: the item leaves the watcher with its bus name; a later
+                // registration is a new item.
+                Some(shown) if !model.icon_shown => shown.shutdown().await,
+                Some(shown) => {
+                    let update = model.clone();
+                    if shown
+                        .update(move |tray| tray.model = update)
+                        .await
+                        .is_some()
+                    {
+                        handle = Some(shown);
+                    } else {
+                        failed = true;
+                    }
+                }
+                None if model.icon_shown && !failed => {
+                    // Stay registered even if the desktop's watcher starts after the application.
+                    match tray(model.clone()).assume_sni_available(true).spawn().await {
+                        Ok(shown) => handle = Some(shown),
+                        Err(error) => {
+                            log::warn!("StatusNotifierItem: {error}");
+                            failed = true;
+                        }
+                    }
+                }
+                None => failed &= model.icon_shown,
             }
-        };
-        while rx.changed().await.is_ok() {
-            let model = rx.borrow_and_update().clone();
-            if handle
-                .update(move |tray| tray.model = model)
-                .await
-                .is_none()
-            {
+            if rx.changed().await.is_err() {
                 break;
             }
+            model = rx.borrow_and_update().clone();
         }
-        handle.shutdown().await;
+        if let Some(shown) = handle {
+            shown.shutdown().await;
+        }
     });
     Ok(())
 }

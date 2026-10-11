@@ -33,6 +33,8 @@ pub struct TrayModel {
     pub hide_shortcut: Option<String>,
     pub quit_shortcut: Option<String>,
     pub dark_icon: bool,
+    /// The tray / menu-bar icon is shown at all (`[tray] show`, shell plugin hand-over).
+    pub icon_shown: bool,
 }
 
 impl TrayModel {
@@ -128,6 +130,7 @@ impl TrayModel {
             hide_shortcut: None,
             quit_shortcut: None,
             dark_icon: false,
+            icon_shown: true,
         }
     }
 
