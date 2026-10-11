@@ -137,6 +137,102 @@ fn one_shot_commands_print_the_reply_and_exit_by_its_outcome() {
     assert!(out.is_empty(), "invalid arguments are a usage error");
 }
 
+#[test]
+fn instance_handover_uses_the_control_hello_and_forwards_launcher_activation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let owner = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        assert!(next_line(&mut reader, &mut line));
+        let handshake: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(handshake["type"], "hello");
+        assert_eq!(handshake["protocol"], PROTOCOL);
+        assert_eq!(
+            handshake["watch"], false,
+            "handover must not withdraw the tray"
+        );
+        assert!(next_line(&mut reader, &mut line));
+        let request: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(
+            request,
+            json!({"type":"set_window_visible","id":1,"visible":true,
+                   "activationToken":"wayland-token","desktopStartupId":"desktop-id"})
+        );
+        // A pre-lock v0.3.0 owner ignores new fields but recognizes the existing command.
+        reader
+            .get_mut()
+            .write_all(b"{\"type\":\"reply\",\"id\":1,\"ok\":true,\"visible\":true}\n")
+            .unwrap();
+    });
+    assert_eq!(
+        show_running_window(
+            UnixStream::connect(path).unwrap(),
+            Some("wayland-token"),
+            Some("desktop-id"),
+            REPLY_TIMEOUT
+        ),
+        Ok(())
+    );
+    owner.join().unwrap();
+}
+
+#[test]
+fn handover_without_tokens_succeeds_and_rejected_commands_are_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = Server::start(
+        &dir.path().join("ultra-9000"),
+        |command, responder| {
+            assert_eq!(
+                command,
+                Command::SetWindowVisible {
+                    visible: control::Visibility::Set(true),
+                    activation_token: None,
+                    desktop_startup_id: None,
+                }
+            );
+            responder.send(Ok([("visible".into(), json!(true))].into_iter().collect()));
+        },
+        || {},
+    )
+    .unwrap();
+    assert_eq!(
+        show_running_window(
+            UnixStream::connect(socket(dir.path())).unwrap(),
+            None,
+            None,
+            REPLY_TIMEOUT
+        ),
+        Ok(())
+    );
+    owner.close();
+
+    let dir = tempfile::tempdir().unwrap();
+    let owner = server(dir.path(), false);
+    let error = show_running_window(
+        UnixStream::connect(socket(dir.path())).unwrap(),
+        None,
+        None,
+        REPLY_TIMEOUT,
+    )
+    .unwrap_err();
+    assert!(error.contains("unknown_item"));
+    owner.close();
+    let (client, peer) = UnixStream::pair().unwrap();
+    drop(peer);
+    assert!(show_running_window(client, None, None, REPLY_TIMEOUT)
+        .unwrap_err()
+        .contains("disconnected"));
+}
+
+#[test]
+fn instance_handover_respects_an_exhausted_reply_deadline() {
+    let (client, _owner) = UnixStream::pair().unwrap();
+    assert!(show_running_window(client, None, None, Duration::ZERO).is_err());
+}
+
 /// Collects stdout; runs `on_line` for every completed line and fails the write that
 /// completes a line `on_line` answers true for (stdout closed).
 struct Stdout<'a> {

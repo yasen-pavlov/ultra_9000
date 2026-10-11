@@ -1211,6 +1211,9 @@ pub fn last_set_dismiss() -> Result<UiStateFile, String> {
 pub fn last_set_entries() -> Result<Vec<ui_state::LastSetEntry>, String> {
     with(|w| Ok(w.ui.last_set.clone()))
 }
+pub fn is_quitting() -> Result<bool, String> {
+    with(|w| Ok(w.quitting))
+}
 pub fn quit_snapshot() -> Result<UiStateFile, String> {
     with(|w| {
         w.quitting = true;

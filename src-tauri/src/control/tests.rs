@@ -422,9 +422,30 @@ fn every_command_decodes_its_arguments_and_defaults() {
             decode(&format!(
                 r#"{{"type":"set_window_visible","id":1,"visible":{visible}}}"#
             )),
-            Ok(Command::SetWindowVisible { visible: expected })
+            Ok(Command::SetWindowVisible {
+                visible: expected,
+                activation_token: None,
+                desktop_startup_id: None,
+            })
         );
     }
+    assert_eq!(
+        decode(
+            r#"{"type":"set_window_visible","id":1,"visible":true,"activationToken":"wayland-token","desktopStartupId":"desktop-id"}"#
+        ),
+        Ok(Command::SetWindowVisible {
+            visible: Visibility::Set(true),
+            activation_token: Some("wayland-token".into()),
+            desktop_startup_id: Some("desktop-id".into()),
+        })
+    );
+    assert_eq!(
+        decode(r#"{"type":"set_window_visible","id":1,"visible":true,"activationToken":42}"#)
+            .unwrap_err()
+            .1
+            .error,
+        "bad_request"
+    );
     assert_eq!(
         decode(r#"{"type":"new_item","id":1,"projectId":"/p","kind":"neovim"}"#),
         Ok(Command::NewItem {
@@ -463,6 +484,26 @@ fn every_command_decodes_its_arguments_and_defaults() {
             .error,
         "bad_request"
     );
+}
+
+#[test]
+fn activation_fields_accept_the_byte_boundary_and_reject_nul_and_oversize() {
+    for field in ["activationToken", "desktopStartupId"] {
+        for valid in ["".to_owned(), "a".repeat(4096), "é".repeat(2048)] {
+            let request = json!({"type":"set_window_visible","id":1,"visible":true,field:valid});
+            assert!(parse_command(request.to_string().as_bytes()).is_ok());
+        }
+        for invalid in ["a\0b".to_owned(), "a".repeat(4097), "é".repeat(2049)] {
+            let request = json!({"type":"set_window_visible","id":1,"visible":true,field:invalid});
+            assert_eq!(
+                parse_command(request.to_string().as_bytes())
+                    .unwrap_err()
+                    .1
+                    .error,
+                "bad_request"
+            );
+        }
+    }
 }
 
 #[test]
@@ -753,8 +794,12 @@ mod commands {
     fn set_window_visible_shows_hides_and_toggles() {
         let f = setup();
         let visible = |visible| {
-            f.run(Command::SetWindowVisible { visible })
-                .map(|done| done["visible"].clone())
+            f.run(Command::SetWindowVisible {
+                visible,
+                activation_token: None,
+                desktop_startup_id: None,
+            })
+            .map(|done| done["visible"].clone())
         };
         assert_eq!(visible(Visibility::Set(false)), Ok(json!(false)));
         assert!(!lifecycle::window_visible());
@@ -765,6 +810,39 @@ mod commands {
             Ok(json!(false))
         );
         assert_eq!(visible(Visibility::Set(true)), Ok(json!(true)));
+        assert_eq!(
+            f.run(Command::SetWindowVisible {
+                visible: Visibility::Set(true),
+                activation_token: Some("wayland-token".into()),
+                desktop_startup_id: Some("desktop-id".into()),
+            })
+            .map(|done| done["visible"].clone()),
+            Ok(json!(true)),
+            "showing an already-visible window accepts best-effort activation fields"
+        );
+    }
+
+    #[test]
+    fn a_quitting_owner_rejects_handover_until_quitting_is_cancelled() {
+        let f = setup();
+        let show = || Command::SetWindowVisible {
+            visible: Visibility::Set(true),
+            activation_token: None,
+            desktop_startup_id: None,
+        };
+        lifecycle::hide_window(f.app.handle()).unwrap();
+        workspace::quit_snapshot().unwrap();
+        assert_eq!(f.run(show()).unwrap_err().error, "quitting");
+        assert!(
+            !lifecycle::window_visible(),
+            "a dying owner must not accept handover"
+        );
+        workspace::cancel_quitting();
+        assert!(
+            f.run(show()).is_ok(),
+            "a failed/cancelled quit can show again"
+        );
+        assert!(lifecycle::window_visible());
     }
 
     #[test]

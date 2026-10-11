@@ -9,6 +9,18 @@ Settings are files you can keep in git, at `~/.config/ultra-9000/` on Linux and 
 
 Changes apply live where possible. An invalid key keeps its last good value and shows a banner in Settings (Ctrl+Shift+, / Cmd+,). The settings sheet edits a small subset in place and preserves comments. UI memory (sidebar state, folded projects, the last quit's agent set) lives in `~/.local/state/ultra-9000/state.json` (`$XDG_STATE_HOME/ultra-9000/state.json`) and is not a setting.
 
+## Single-instance launch
+
+A second launch shows, unminimizes, raises and focuses the running window instead of starting another app or resuming its sessions again. On Wayland, the launcher forwards `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID` when available; activation is best effort and still depends on compositor focus policy.
+
+Before GUI initialization, the app takes a non-blocking exclusive `flock` on `instance.lock` in the control link's private runtime directory (Linux: `$XDG_RUNTIME_DIR/ultra-9000`, or a per-user directory in the temp directory; macOS: `<per-user temp>/ultra-9000`). The owner writes a complete `<pid> <lock filename>` record and holds the fd until exit; the kernel releases the lock after a crash, so an existing lock file is not a stale lock and must not be deleted.
+
+If the owner is still starting or quitting, the launcher retries for up to 5 s. Each attempt first tries to acquire the same lock; if the previous process has exited, the launcher becomes the new owner and starts normally. Otherwise it reads a complete record for the matching key and sends a show command to `control-<pid>.sock`. Disconnects, unavailable sockets and rejected handovers (including `quitting`) are retried within that deadline. A successful handover exits 0 and prints `Ultra 9000 is already running (pid N); showing its window.` to stderr; exhausting the deadline exits 1 with an explanation, never starting without the lock. An ordinary release launch also hands over to a live pre-lock v0.3.0 control socket, excluding every pid that owns a held `instance*.lock` (so newer debug/isolated instances are not legacy owners). v0.2.0 has no control socket and cannot be detected.
+
+Debug builds use `instance-debug.lock` and do not hand over to the installed release app. For an isolated run of either build profile, set `ULTRA9000_INSTANCE=<name>`: 1–32 characters drawn from lowercase ASCII letters, digits, `_` and `-`; invalid names fail before GUI startup. This selects `instance-<name>.lock` and disables the pre-lock fallback. Use a unique name for native test harnesses, alongside isolated config/state/data directories (the name isolates the instance lock, not settings or session stores). `ultra9000 ctl` never takes an instance lock.
+
+Startup fails rather than starting an unprotected instance if the runtime directory is not private. The error names its path, whether you own it, and its mode: it must be a non-symlink directory owned by you, with no group/other access (normally mode 0700). Set `XDG_RUNTIME_DIR` on Linux, or `TMPDIR` on macOS, to a private directory owned by you. If the app's runtime directory is abandoned or squatted, remove it only after ensuring no Ultra 9000 instance is using it; never delete a live lock file.
+
 ## Keyboard shortcuts
 
 App shortcuts work while the terminal or the web view has focus. They match the **physical key**, so they work under any keyboard layout. Override them in `keys.toml` with the action names below, for example:
@@ -91,6 +103,7 @@ ultra9000 ctl watch [--client NAME]       # prints the app's lines (newline-deli
 ultra9000 ctl select_item '{"itemId":"item-3"}'
 ultra9000 ctl jump_to_waiting
 ultra9000 ctl set_window_visible '{"visible":"toggle"}'
+ultra9000 ctl set_window_visible '{"visible":true,"activationToken":"<XDG_ACTIVATION_TOKEN>","desktopStartupId":"<DESKTOP_STARTUP_ID>"}' # activation fields optional
 ultra9000 ctl new_item '{"projectId":"/abs/project","kind":"shell"}'   # kind: agent | shell | neovim, optional tool
 ultra9000 ctl open_palette '{"projectId":"/abs/project"}'
 ultra9000 ctl close_item '{"itemId":"item-3","confirmed":false}'
@@ -98,6 +111,10 @@ ultra9000 ctl request_quit
 ```
 
 `watch` prints a `snapshot` of the sidebar (projects and items in sidebar order with their state, no icons) at once and after every change, a `ping` every 5 s, and `{"type":"disconnected"}` once whenever no app is running or the app goes away; it reconnects every 1 s, backing off to 10 s. A one-shot command prints its `reply` and exits 0 if it succeeded, 1 if not, or 2 when no app is running (printing `{"type":"disconnected"}`) or the arguments are not a JSON object. `close_item` follows the app's close rules but never opens the app's confirmation; it answers `"result":"needs-confirmation"` with a `reason` instead, and `"confirmed":true` closes. The newest running instance is used; `ULTRA9000_CONTROL_SOCKET=<path>` picks a socket explicitly. Inside the macOS bundle the binary is `Ultra 9000.app/Contents/MacOS/ultra9000`.
+
+`set_window_visible` accepts optional string fields `activationToken` and `desktopStartupId`, each at most 4096 bytes and without NUL (invalid values return `bad_request`). When showing the window it also unminimizes, raises and requests focus, even if already visible; Linux passes the activation token (preferred), or the startup id, to GTK 3 before presenting the window. Missing activation fields are valid; fields have no effect when hiding and are ignored on macOS. Once quit begins, the command returns `quitting`; if saving fails and quitting is cancelled it becomes available again. The single-instance launcher uses this existing command with `visible:true` and a non-watching hello, so handover does not suppress the tray; older v0.3.0 owners ignore the added fields.
+
+The single-instance launcher drops invalid activation environment values instead of forwarding them: showing the window still succeeds without activation. Direct control commands with invalid activation fields continue to return `bad_request`.
 
 ## Provider resolution
 

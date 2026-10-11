@@ -9,6 +9,7 @@ mod config;
 mod control;
 mod ctl;
 mod discovery;
+mod instance;
 mod launch;
 mod lifecycle;
 #[cfg(target_os = "linux")]
@@ -43,6 +44,18 @@ const BACKGROUND: Color = Color(0x21, 0x21, 0x21, 0xff);
 
 /// Start Ultra 9000 and run its event loop until the app quits.
 pub fn run() {
+    let _instance_lock = match instance::start() {
+        Ok(instance::Launch::Owner(lock)) => lock,
+        Ok(instance::Launch::HandedOver(pid)) => {
+            eprintln!("Ultra 9000 is already running (pid {pid}); showing its window.");
+            return;
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    // Keep the fd (and its flock) through startup, the event loop and final teardown.
     app().run(on_run_event);
 }
 

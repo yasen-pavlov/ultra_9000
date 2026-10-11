@@ -404,6 +404,10 @@ pub enum Command {
     JumpToWaiting {},
     SetWindowVisible {
         visible: Visibility,
+        #[serde(default, deserialize_with = "activation_id")]
+        activation_token: Option<String>,
+        #[serde(default, deserialize_with = "activation_id")]
+        desktop_startup_id: Option<String>,
     },
     NewItem {
         project_id: String,
@@ -421,6 +425,22 @@ pub enum Command {
         confirmed: bool,
     },
     RequestQuit {},
+}
+
+pub(crate) fn valid_activation_id(id: &str) -> bool {
+    id.len() <= 4096 && !id.contains('\0')
+}
+
+fn activation_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let id = Option::<String>::deserialize(deserializer)?;
+    if id.as_deref().is_some_and(|id| !valid_activation_id(id)) {
+        return Err(serde::de::Error::custom(
+            "activationToken/desktopStartupId must be at most 4096 bytes and contain no NUL",
+        ));
+    }
+    Ok(id)
 }
 
 const COMMANDS: &[&str] = &[
@@ -514,14 +534,25 @@ pub async fn execute<R: Runtime>(app: AppHandle<R>, command: Command) -> Result<
             })
             .await
         }
-        Command::SetWindowVisible { visible } => {
+        Command::SetWindowVisible {
+            visible,
+            activation_token,
+            desktop_startup_id,
+        } => {
             on_main(move || {
+                if workspace::is_quitting()? {
+                    return Err(Failure::new("quitting", "Ultra 9000 is quitting."));
+                }
                 let visible = match visible {
                     Visibility::Set(visible) => visible,
                     Visibility::Toggle(Toggle::Toggle) => !lifecycle::window_visible(),
                 };
                 if visible {
-                    lifecycle::show_window(&app)?;
+                    lifecycle::show_window_with_activation(
+                        &app,
+                        activation_token.as_deref(),
+                        desktop_startup_id.as_deref(),
+                    )?;
                 } else {
                     lifecycle::hide_window(&app)?;
                 }
