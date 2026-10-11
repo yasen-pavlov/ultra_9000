@@ -1,7 +1,10 @@
 //! Native item/project authority. All mutation and embed calls are main-thread-only.
 //! Lifecycle state is lossless; only bells have a bounded FIFO.
 use crate::{
-    config::{Settings, SettingsError, SettingsState, StatusSource, ToolIcon, ToolKind, ToolSpec},
+    config::{
+        Settings, SettingsError, SettingsState, StatusSource, ToolIcon, ToolKind, ToolSpec,
+        TrayShow,
+    },
     discovery::{Conversation, ConversationList, StoreError},
     launch,
     omp_link::{self, Credentials, Delivery, Message},
@@ -108,7 +111,7 @@ pub struct ProjectState {
 #[serde(rename_all = "camelCase")]
 pub struct ToolInfo {
     pub(crate) id: String,
-    label: String,
+    pub(crate) label: String,
     pub(crate) glyph: String,
     icon: Option<ToolIcon>,
     accent: Option<String>,
@@ -332,6 +335,7 @@ impl Host for Native {
             let _ = window.set_title(&window_title(&state));
         }
         crate::lifecycle::update_tray(&self.app, &state);
+        crate::control::publish(&state);
         if let Err(e) = self.app.emit(WORKSPACE_STATE_EVENT, state) {
             log::warn!("workspace event: {e}");
         }
@@ -660,6 +664,9 @@ pub fn notify_needs_you() -> Result<bool, String> {
 }
 pub fn tray_dark_icon() -> Result<bool, String> {
     with(|w| Ok(w.settings.tray_icon == "dark"))
+}
+pub fn tray_show() -> Result<TrayShow, String> {
+    with(|w| Ok(w.settings.tray_show))
 }
 #[cfg(target_os = "macos")]
 pub fn app_handle() -> Result<AppHandle, String> {
@@ -1039,6 +1046,19 @@ pub fn restart_target(id: &str) -> Result<RestartTarget, String> {
 pub fn select(id: &str) -> Result<(), String> {
     with(|w| w.select(id))
 }
+/// Whether `id` is a row of the sidebar.
+pub fn has_item(id: &str) -> Result<bool, String> {
+    with(|w| Ok(w.index(id).is_ok()))
+}
+/// The default tool of a project the sidebar lists, `None` for any other project id.
+pub fn listed_project_default_tool(project_id: &str) -> Result<Option<String>, String> {
+    with(|w| {
+        Ok(w.projects()
+            .into_iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.default_tool))
+    })
+}
 pub fn sheet_open(sheet: OpenableSheet) -> Result<(), String> {
     with(|w| {
         let before = w.presented();
@@ -1056,15 +1076,34 @@ pub fn sheet_close() -> Result<(), String> {
         Ok(())
     })
 }
+/// What closing an item did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseOutcome {
+    Closed,
+    /// Nothing stopped: the close rules want the user to confirm first.
+    NeedsConfirmation(CloseReason),
+}
+/// Close from the UI: a needed confirmation opens the app's confirmation sheet (`"confirm"`).
 pub fn close(id: &str, confirmed: bool) -> Result<&'static str, String> {
+    close_item(id, confirmed, true).map(|outcome| match outcome {
+        CloseOutcome::Closed => "closed",
+        CloseOutcome::NeedsConfirmation(_) => "confirm",
+    })
+}
+/// Close from outside the window (shell control link): the same rules, but a needed
+/// confirmation is only reported, never shown in the app.
+pub fn close_reporting(id: &str, confirmed: bool) -> Result<CloseOutcome, String> {
+    close_item(id, confirmed, false)
+}
+fn close_item(id: &str, confirmed: bool, ask_in_app: bool) -> Result<CloseOutcome, String> {
     with(|w| {
         let index = w.index(id)?;
         if w.records[index].state.process != Process::Running {
             w.remove(index, false)?;
-            return Ok("closed");
+            return Ok(CloseOutcome::Closed);
         }
         if w.records[index].closing {
-            return Ok("closed");
+            return Ok(CloseOutcome::Closed);
         }
         let record = &w.records[index];
         let job = if record.state.tool == "shell" {
@@ -1079,17 +1118,20 @@ pub fn close(id: &str, confirmed: bool) -> Result<&'static str, String> {
                 &w.settings,
                 job.is_some(),
             ) {
+                if !ask_in_app {
+                    return Ok(CloseOutcome::NeedsConfirmation(reason));
+                }
                 if reason == CloseReason::ForegroundJob {
                     w.publish_shell_executable(index);
                 }
                 let before = w.presented();
                 w.sheet = Some(Sheet::ConfirmClose {
                     item_id: id.into(),
-                    reason,
+                    reason: reason.clone(),
                     detail: job.and_then(|j| j.name),
                 });
                 w.present(before);
-                return Ok("confirm");
+                return Ok(CloseOutcome::NeedsConfirmation(reason));
             }
         }
         if let Some(key) = w.records[index].key {
@@ -1101,7 +1143,7 @@ pub fn close(id: &str, confirmed: bool) -> Result<&'static str, String> {
             w.sheet = None;
             w.present(before);
         }
-        Ok("closed")
+        Ok(CloseOutcome::Closed)
     })
 }
 pub fn close_reason(
@@ -1507,22 +1549,7 @@ pub fn dispatch(action: Action) -> Result<(), String> {
             w.present(before);
             Ok(())
         }),
-        JumpWaiting => with(|w| {
-            // Keep previously visited your-turn entries during a repeated jump, but drop
-            // anything that resumed working/exited, and re-sort newly arriving approvals.
-            let remembered = if w.waiting_cursor.as_deref() == w.active.as_deref() {
-                w.waiting_cycle.as_slice()
-            } else {
-                &[]
-            };
-            let order = waiting_cycle_order(w.records.iter().map(|r| &r.state), remembered);
-            if let Some(id) = cycle(&order, w.waiting_cursor.as_deref(), true) {
-                w.select(&id)?;
-                w.waiting_cycle = order;
-                w.waiting_cursor = Some(id);
-            }
-            Ok(())
-        }),
+        JumpWaiting => jump_waiting().map(|_| ()),
         Item(_) | ItemPrevious | ItemNext | ProjectPrevious | ProjectNext => with(|w| {
             let projects = w.projects();
             let order = visible_order(&projects, &w.ui.folded_projects);
@@ -1558,6 +1585,23 @@ pub fn dispatch(action: Action) -> Result<(), String> {
             Ok(())
         }),
     }
+}
+/// Select the next waiting item (needs-you first, then unseen turns, oldest first) and return
+/// it; `None` when nothing waits. Repeated jumps cycle through what was waiting.
+pub fn jump_waiting() -> Result<Option<String>, String> {
+    with(|w| {
+        let (order, next) = w.waiting_order();
+        if let Some(id) = &next {
+            w.select(id)?;
+            w.waiting_cycle = order;
+            w.waiting_cursor = Some(id.clone());
+        }
+        Ok(next)
+    })
+}
+/// The item [`jump_waiting`] would select now.
+pub fn waiting_next() -> Result<Option<String>, String> {
+    with(|w| Ok(w.waiting_order().1))
 }
 pub fn persist_ui(ui: UiStateFile) {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1936,6 +1980,19 @@ impl Workspace {
         if let Some(key) = before {
             self.host.hide(key);
         }
+    }
+    /// The waiting cycle and the item a jump selects next. A repeated jump keeps the your-turn
+    /// entries it already visited but drops anything that resumed working or exited, and
+    /// re-sorts newly arriving approvals.
+    fn waiting_order(&self) -> (Vec<String>, Option<String>) {
+        let remembered = if self.waiting_cursor.as_deref() == self.active.as_deref() {
+            self.waiting_cycle.as_slice()
+        } else {
+            &[]
+        };
+        let order = waiting_cycle_order(self.records.iter().map(|r| &r.state), remembered);
+        let next = cycle(&order, self.waiting_cursor.as_deref(), true);
+        (order, next)
     }
     fn select(&mut self, id: &str) -> Result<(), String> {
         let index = self.index(id)?;

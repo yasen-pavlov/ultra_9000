@@ -48,6 +48,7 @@ fn model(visible: bool, needs_you: usize, more_running: usize) -> TrayModel {
         hide_shortcut: Some("Ctrl+Shift+H".into()),
         quit_shortcut: Some("Ctrl+Shift+Q".into()),
         dark_icon: false,
+        icon_shown: true,
     }
 }
 fn tray(model: TrayModel) -> (LinuxTray, mpsc::Receiver<TrayAction>) {
@@ -56,8 +57,8 @@ fn tray(model: TrayModel) -> (LinuxTray, mpsc::Receiver<TrayAction>) {
     let tray = LinuxTray {
         on_action: Box::new(move |action| tx.send(action).unwrap()),
         model,
-        light,
-        dark,
+        light: std::sync::Arc::new(light),
+        dark: std::sync::Arc::new(dark),
     };
     (tray, actions)
 }

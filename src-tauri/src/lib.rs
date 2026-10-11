@@ -6,6 +6,8 @@ compile_error!("Ultra 9000 supports macOS and Linux (Wayland) only");
 
 mod commands;
 mod config;
+mod control;
+mod ctl;
 mod discovery;
 mod launch;
 mod lifecycle;
@@ -42,6 +44,12 @@ const BACKGROUND: Color = Color(0x21, 0x21, 0x21, 0xff);
 /// Start Ultra 9000 and run its event loop until the app quits.
 pub fn run() {
     app().run(on_run_event);
+}
+
+/// Run `ultra9000 ctl <args>` (the shell control link's client) without starting the app;
+/// returns the process exit code.
+pub fn ctl(args: Vec<std::ffi::OsString>) -> i32 {
+    ctl::main(args)
 }
 
 /// Production startup and platform entry points for the GUI integration tests
@@ -118,6 +126,7 @@ fn app() -> App {
         .setup(|app| {
             omp_link::start();
             workspace::init(app.handle().clone());
+            control::start(app.handle().clone());
             #[cfg(target_os = "macos")]
             macos::install_terminate_hook(lifecycle::confirm_and_stop_sessions);
             let window = create_main_window(app)?;
@@ -180,6 +189,7 @@ fn on_run_event(app: &AppHandle, event: RunEvent) {
         // Final teardown; stopping sessions is a no-op when the confirmed quit already did.
         RunEvent::Exit => {
             workspace::shutdown_all();
+            control::shutdown();
             omp_link::shutdown();
         }
         _ => (),

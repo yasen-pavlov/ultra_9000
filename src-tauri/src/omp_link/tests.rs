@@ -75,6 +75,7 @@ fn start_prepares_a_private_runtime_dir_extension_and_socket() {
     let instance = |pid: u32| {
         [
             runtime.join(format!("omp-{pid}.sock")),
+            runtime.join(format!("control-{pid}.sock")),
             runtime.join(format!("ultra9000-status-{pid}.ts")),
         ]
     };

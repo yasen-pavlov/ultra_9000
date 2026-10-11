@@ -382,6 +382,32 @@ fn icon_errors_open_the_key_source_instead_of_the_image() {
 }
 
 #[test]
+fn tray_show_defaults_to_auto_reloads_and_rejects_unknown_values() {
+    let f = Fixture::new();
+    let mut store = ConfigStore::load(f.0.clone());
+    assert_eq!(store.settings().tray_show, TrayShow::Auto);
+    fs::write(&f.0.ultra, "[tray]\nicon='dark'\nshow='never'\n").unwrap();
+    store.reload();
+    assert_eq!(store.settings().tray_show, TrayShow::Never);
+    assert_eq!(
+        store.settings().tray_icon,
+        "dark",
+        "show and icon are separate keys"
+    );
+    fs::write(&f.0.ultra, "[tray]\nshow='always'\n").unwrap();
+    store.reload();
+    assert_eq!(store.settings().tray_show, TrayShow::Always);
+    fs::write(&f.0.ultra, "[tray]\nshow='hidden'\n").unwrap();
+    store.reload();
+    assert_eq!(store.snapshot().errors.len(), 1);
+    assert_eq!(
+        store.settings().tray_show,
+        TrayShow::Always,
+        "an invalid value keeps the last good one"
+    );
+}
+
+#[test]
 fn removed_icon_mode_and_invalid_icon_choices_are_reported() {
     let f = Fixture::new();
     fs::write(&f.0.ultra, "[sidebar]\nicon='model'\nprovider_mark='tiny'\n[icons]\nbrand_color='always'\n[tray]\nicon='auto'\n[tools.omp]\nicon_tint='blue'\nicon_fill='yes'\naccent='mint'\n[tools.shell]\naccent='#ABCDEF'\n").unwrap();

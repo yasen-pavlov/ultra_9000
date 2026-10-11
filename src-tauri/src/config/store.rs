@@ -4,7 +4,7 @@ use super::{
     schema::{
         defaults, key_name, validate, IconTint, SettingValue, Settings, SettingsError,
         SettingsFile, SettingsState, Source, StatusSource, StoreKind, ToolIcon, ToolKind, ToolSpec,
-        WriteTarget, UI_KEYS,
+        TrayShow, WriteTarget, UI_KEYS,
     },
     write,
 };
@@ -485,7 +485,7 @@ impl ConfigStore {
         } else if file == self.paths.keys {
             "# Native physical shortcuts. Empty string unbinds an action.\n[bindings]\n# palette = \"Ctrl+Shift+Space\" # Linux; use Cmd+O on macOS\n"
         } else {
-            "# Ultra 9000 settings. Machine files override ultra.toml.\n# [launch]\n# default_tool = \"omp\"\n# [sidebar]\n# width = 304 # 240–360\n# density = \"comfortable\" # comfortable | compact\n# provider_mark = \"corner\" # corner | off\n# auto_collapse_below = 800\n# [icons]\n# brand_color = \"all\" # all | pickers | launch | off\n# [tray]\n# icon = \"light\" # light | dark\n# [layout]\n# context_bar = \"auto\" # auto | always | never\n# [notify]\n# needs_you = true\n# turn_finished = false\n# [projects]\n# pinned = []\n# roots = [] # absolute paths; empty means all projects\n# [projects.\"/absolute/project\"]\n# default_tool = \"claude\"\n# [tools.custom]\n# command = \"custom\" # argv data, never shell-evaluated\n# args = []\n# resume = [\"--resume\", \"{id}\"]\n# glyph = \"ag\" # optional letters; omit for the generic agent mark\n# icon = \"icons/custom.svg\" # SVG or PNG, relative to this folder\n# icon_tint = \"mono\" # mono | original\n# icon_fill = false\n# accent = \"#7fdbca\" # colour of single-colour marks\n# [providers.example]\n# icon = \"icons/provider.svg\"\n"
+            "# Ultra 9000 settings. Machine files override ultra.toml.\n# [launch]\n# default_tool = \"omp\"\n# [sidebar]\n# width = 304 # 240–360\n# density = \"comfortable\" # comfortable | compact\n# provider_mark = \"corner\" # corner | off\n# auto_collapse_below = 800\n# [icons]\n# brand_color = \"all\" # all | pickers | launch | off\n# [tray]\n# icon = \"light\" # light | dark\n# show = \"auto\" # auto | always | never; auto: hidden while a shell plugin shows Ultra 9000\n# [layout]\n# context_bar = \"auto\" # auto | always | never\n# [notify]\n# needs_you = true\n# turn_finished = false\n# [projects]\n# pinned = []\n# roots = [] # absolute paths; empty means all projects\n# [projects.\"/absolute/project\"]\n# default_tool = \"claude\"\n# [tools.custom]\n# command = \"custom\" # argv data, never shell-evaluated\n# args = []\n# resume = [\"--resume\", \"{id}\"]\n# glyph = \"ag\" # optional letters; omit for the generic agent mark\n# icon = \"icons/custom.svg\" # SVG or PNG, relative to this folder\n# icon_tint = \"mono\" # mono | original\n# icon_fill = false\n# accent = \"#7fdbca\" # colour of single-colour marks\n# [providers.example]\n# icon = \"icons/provider.svg\"\n"
         };
         write::atomic(file, text.as_bytes())
     }
@@ -626,6 +626,13 @@ fn apply_setting(s: &mut Settings, p: &[String], v: &toml::Value, sourced: bool)
         "sidebar.provider_mark" => s.sidebar_provider_mark = string(v),
         "icons.brand_color" => s.brand_color = string(v),
         "tray.icon" => s.tray_icon = string(v),
+        "tray.show" => {
+            s.tray_show = match v.as_str() {
+                Some("always") => TrayShow::Always,
+                Some("never") => TrayShow::Never,
+                _ => TrayShow::Auto,
+            }
+        }
         "sidebar.auto_collapse_below" => {
             s.sidebar_auto_collapse_below = v.as_integer().unwrap() as u32
         }
