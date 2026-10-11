@@ -377,14 +377,47 @@ pub fn hide_app<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     }
 }
 pub fn show_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    show_window_with_activation(app, None, None)
+}
+
+pub fn show_window_with_activation<R: Runtime>(
+    app: &AppHandle<R>,
+    activation_token: Option<&str>,
+    desktop_startup_id: Option<&str>,
+) -> Result<(), String> {
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .ok_or("main window not found")?;
+    // GTK 3 passes the startup id to GDK's Wayland activation path. Prefer the launcher's
+    // XDG token; DESKTOP_STARTUP_ID supports launchers using the older startup protocol.
+    // Use the live GTK window, never mutate the running process's launch environment.
+    #[cfg(target_os = "linux")]
+    let gtk_window = if std::any::TypeId::of::<R>() == std::any::TypeId::of::<tauri::Wry>() {
+        window.gtk_window().ok()
+    } else {
+        // Non-native runtimes (including the headless test runtime) have no GTK window.
+        None
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(gtk_window) = &gtk_window {
+        use gtk::prelude::GtkWindowExt;
+        if let Some(id) = activation_token.or(desktop_startup_id) {
+            gtk_window.set_startup_id(id);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let _ = (activation_token, desktop_startup_id);
     if window.is_minimized().unwrap_or(false) {
         window.unminimize().map_err(|e| e.to_string())?;
     }
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    if let Some(gtk_window) = gtk_window {
+        use gtk::prelude::GtkWindowExt;
+        // Present also raises an already-visible window; absence of a token is fine.
+        gtk_window.present();
+    }
     WINDOW_SHOWN.store(true, Ordering::Release);
     refresh_tray(app);
     Ok(())

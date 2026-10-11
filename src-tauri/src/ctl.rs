@@ -15,7 +15,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     os::{fd::AsFd, unix::net::UnixStream},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 const USAGE: &str = "usage: ultra9000 ctl watch [--client NAME]\n       ultra9000 ctl <command> ['<json args object>']\n";
@@ -77,7 +77,7 @@ fn candidates() -> Vec<PathBuf> {
 /// The override when set, else the `control-<pid>.sock` files in `dir` whose app still runs,
 /// newest first; none unless `dir` is private to this user (the temp-dir fallback could have
 /// been created by someone else). `dir` is never created.
-fn socket_candidates(env: Option<OsString>, dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn socket_candidates(env: Option<OsString>, dir: &Path) -> Vec<PathBuf> {
     if let Some(path) = env.filter(|path| !path.is_empty()) {
         return vec![PathBuf::from(path)];
     }
@@ -237,7 +237,7 @@ fn run_command(
     args: Option<&str>,
     stream: Option<UnixStream>,
 ) -> i32 {
-    let mut request = match args.map(serde_json::from_str::<Value>) {
+    let args = match args.map(serde_json::from_str::<Value>) {
         None => Map::new(),
         Some(Ok(Value::Object(args))) => args,
         Some(_) => {
@@ -245,30 +245,7 @@ fn run_command(
             return 2;
         }
     };
-    request.insert("type".into(), json!(command));
-    request.insert("id".into(), json!(1));
-    let mut line = hello("ctl", false);
-    line.push_str(&Value::Object(request).to_string());
-    line.push('\n');
-    let reply = stream.and_then(|mut stream| {
-        stream.set_read_timeout(Some(REPLY_TIMEOUT)).ok()?;
-        stream.write_all(line.as_bytes()).ok()?;
-        let mut reader = BufReader::new(stream);
-        let mut line = Vec::new();
-        while next_line(&mut reader, &mut line) {
-            let Ok(message) = serde_json::from_slice::<Value>(&line) else {
-                continue;
-            };
-            match message["type"].as_str() {
-                Some("reply") if message["id"] == json!(1) => {
-                    return Some((message["ok"] == json!(true), line))
-                }
-                Some("error") => return Some((false, line)),
-                _ => {}
-            }
-        }
-        None
-    });
+    let reply = command_reply(command, args, stream, REPLY_TIMEOUT);
     let (code, line) = match &reply {
         Some((ok, line)) => (if *ok { 0 } else { 1 }, line.as_slice()),
         None => (2, DISCONNECTED.as_bytes()),
@@ -282,6 +259,71 @@ fn run_command(
         return 2;
     }
     code
+}
+
+/// Shared one-shot hello/request/reply path for ctl and pre-GUI instance handover.
+fn command_reply(
+    command: &str,
+    mut request: Map<String, Value>,
+    stream: Option<UnixStream>,
+    timeout: Duration,
+) -> Option<(bool, Vec<u8>)> {
+    request.insert("type".into(), json!(command));
+    request.insert("id".into(), json!(1));
+    let mut line = hello("ctl", false);
+    line.push_str(&Value::Object(request).to_string());
+    line.push('\n');
+    let mut stream = stream?;
+    if timeout.is_zero() {
+        return None;
+    }
+    let deadline = Instant::now() + timeout;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    stream.write_all(line.as_bytes()).ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut line = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        reader.get_ref().set_read_timeout(Some(remaining)).ok()?;
+        if !next_line(&mut reader, &mut line) {
+            return None;
+        }
+        let Ok(message) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        match message["type"].as_str() {
+            Some("reply") if message["id"] == json!(1) => {
+                return Some((message["ok"] == json!(true), line))
+            }
+            Some("error") => return Some((false, line)),
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn show_running_window(
+    stream: UnixStream,
+    activation_token: Option<&str>,
+    desktop_startup_id: Option<&str>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut args = Map::new();
+    args.insert("visible".into(), json!(true));
+    if let Some(token) = activation_token {
+        args.insert("activationToken".into(), json!(token));
+    }
+    if let Some(id) = desktop_startup_id {
+        args.insert("desktopStartupId".into(), json!(id));
+    }
+    match command_reply("set_window_visible", args, Some(stream), timeout) {
+        Some((true, _)) => Ok(()),
+        Some((false, reply)) => Err(String::from_utf8_lossy(&reply).into_owned()),
+        None => Err("control link disconnected or timed out".into()),
+    }
 }
 
 #[cfg(test)]

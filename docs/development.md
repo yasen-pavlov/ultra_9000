@@ -41,6 +41,8 @@ bun run tauri build --debug --no-bundle        # Linux
 
 The Vite development server listens on `127.0.0.1:1420`. The app has its own bundle identity and does not modify the stock Alacritty application or global Alacritty/Neovim settings.
 
+Debug builds (including `bun run tauri dev` and standalone debug builds) use `instance-debug.lock`, separate from the installed release's `instance.lock`; another debug launch shows the existing debug window. For a nested-Hyprland/native acceptance harness, set `ULTRA9000_INSTANCE=<unique-test-name>` as well as the isolated XDG config/state/data directories. The override works in either build profile, uses `instance-<name>.lock`, and disables legacy-instance discovery so the harness cannot hand over to your daily app. Names are 1–32 lowercase ASCII letters, digits, `_` or `-`. Repeated launches with the same test name exercise handover; use different names to test independent instances. Do not remove a live lock file.
+
 For an installable Arch package from your checkout: `cd packaging/arch && makepkg -si`.
 
 ## Checks
@@ -77,6 +79,7 @@ On Linux the test runs the app's startup (main window, terminal host, shortcut r
 ```sh
 env -u DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY=<nested socket> \
   XDG_CONFIG_HOME=<dir>/config XDG_STATE_HOME=<dir>/state XDG_DATA_HOME=<dir>/data \
+  ULTRA9000_INSTANCE=<unique-test-name> \
   dbus-run-session -- cargo test --manifest-path src-tauri/Cargo.toml --features tauri/custom-protocol --test gui_linux
 ```
 
