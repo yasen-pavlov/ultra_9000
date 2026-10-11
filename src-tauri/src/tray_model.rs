@@ -21,8 +21,8 @@ pub struct Entry {
     pub detail: String,
 }
 
-/// Static menu-bar segments. Only live agents contribute; busy shells, exited items and
-/// already-seen turns deliberately do not.
+/// Static capsule segments use the control link's shared item classification. Busy shells
+/// and seen turns contribute no segment; failed launches/unsuccessful agent exits are errors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BarCounts {
     pub needs_you: usize,
@@ -55,16 +55,18 @@ impl BarCounts {
             if item.process == Process::Running {
                 counts.running += 1;
             }
-            if item.kind != ToolKind::Agent || item.process != Process::Running {
-                continue;
-            }
-            match item.activity {
-                Activity::NeedsYou(_) => counts.needs_you += 1,
-                Activity::Working => counts.working += 1,
-                Activity::OnJob => counts.on_job += 1,
-                Activity::Error => counts.error += 1,
-                Activity::YourTurn => counts.unread += usize::from(item.unread),
-                Activity::Unknown => {}
+            use crate::status::{item_status, ItemStatus};
+            match item_status(item) {
+                ItemStatus::Activity(Activity::NeedsYou(_)) => counts.needs_you += 1,
+                ItemStatus::Activity(Activity::Working) => counts.working += 1,
+                ItemStatus::Activity(Activity::OnJob) => counts.on_job += 1,
+                ItemStatus::Activity(Activity::Error) => counts.error += 1,
+                ItemStatus::Activity(Activity::YourTurn) => {
+                    counts.unread += usize::from(item.unread)
+                }
+                ItemStatus::Starting
+                | ItemStatus::Exited
+                | ItemStatus::Activity(Activity::Unknown) => {}
             }
         }
         counts

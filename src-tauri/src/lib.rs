@@ -70,10 +70,20 @@ pub fn ctl(args: Vec<std::ffi::OsString>) -> i32 {
 /// (`tests/gui_*.rs`), which drive them on the main thread with the real runtime. Not an API.
 #[doc(hidden)]
 pub mod testing {
+    #[cfg(target_os = "macos")]
+    pub use crate::commands::{
+        popover_command, popover_hide, popover_set_height, popover_toggle_main,
+    };
+    #[cfg(target_os = "macos")]
+    pub use crate::control::Command as PopoverCommand;
     pub use crate::lifecycle::{show_window, MAIN_WINDOW};
+    #[cfg(target_os = "macos")]
+    pub use crate::menubar::{show as popover_show, update_menu_bar_title};
     #[cfg(target_os = "macos")]
     pub use crate::platform::{application_hidden, defer_on_main};
     pub use crate::platform::{pick_directory, window_presentable};
+    #[cfg(target_os = "macos")]
+    pub use crate::tray_model::BarCounts;
 
     /// The application exactly as [`crate::run`] builds it; its setup (main window, terminal
     /// host, shortcuts, tray) runs on the event loop's first turn.

@@ -6,7 +6,8 @@ use serde::Serialize;
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
-    create, hide, is_popover_window, recover_menu_only, set_height, update_menu_bar_title, WINDOW,
+    create, hide, is_popover_window, recover_menu_only, set_height, show, update_menu_bar_title,
+    WINDOW,
 };
 #[cfg(any(target_os = "macos", test))]
 mod behavior;
@@ -72,12 +73,7 @@ pub fn anchored_frame(button: Rect, visible: Rect, requested_height: f64) -> Rec
         .max(visible.y);
     let top = anchor - 6_f64.min((anchor - visible.y).max(0.));
     let available_height = (top - visible.y - 8.).max(0.);
-    let height = if requested_height.is_finite() {
-        requested_height.clamp(MIN_HEIGHT, MAX_HEIGHT)
-    } else {
-        MIN_HEIGHT
-    }
-    .min(available_height);
+    let height = clamped_height(requested_height).min(available_height);
     let width = WIDTH.min((visible.width - margin * 2.).max(0.));
     let x = button.x.clamp(
         visible.x + margin,
@@ -88,6 +84,28 @@ pub fn anchored_frame(button: Rect, visible: Rect, requested_height: f64) -> Rec
         y: top - height,
         width,
         height,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn clamped_height(height: f64) -> f64 {
+    if height.is_finite() {
+        height.clamp(MIN_HEIGHT, MAX_HEIGHT)
+    } else {
+        MIN_HEIGHT
+    }
+}
+
+/// Layout-driven height changes preserve the already shown panel's top/left edges, even
+/// if revealing or auto-hiding the bar has since changed the status window/visible frame.
+#[cfg(any(target_os = "macos", test))]
+pub fn resized_frame(current: Rect, visible: Rect, requested_height: f64) -> Rect {
+    let top = current.y + current.height;
+    let height = clamped_height(requested_height).min((top - visible.y - 8.).max(0.));
+    Rect {
+        y: top - height,
+        height,
+        ..current
     }
 }
 

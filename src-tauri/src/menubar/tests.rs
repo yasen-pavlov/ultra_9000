@@ -391,10 +391,12 @@ fn outside_mouse_down_dismisses_only_an_open_panel_not_inside_events_or_mouse_up
 
 #[test]
 fn inactive_toggle_raises_hidden_or_covered_windows_and_hides_a_visible_one() {
-    assert!(!toggle_hides_main(false, false));
-    assert!(!toggle_hides_main(false, true));
-    assert!(!toggle_hides_main(true, false));
-    assert!(toggle_hides_main(true, true));
+    assert!(!toggle_hides_main(false, false, true));
+    assert!(!toggle_hides_main(false, true, true));
+    assert!(!toggle_hides_main(true, false, true));
+    assert!(toggle_hides_main(true, true, true));
+    assert!(!toggle_hides_main(true, true, false));
+    assert!(!toggle_hides_main(true, false, false));
 }
 
 #[test]
@@ -479,4 +481,33 @@ fn attachment_layout_matches_native_title_baselines_and_kern() {
         kern_after: 3.
     })
     .is_none());
+}
+
+#[test]
+fn visible_resize_keeps_top_and_left_edges_when_the_menu_bar_moves() {
+    let current = anchored_frame(button(), visible(), 300.);
+    let top = current.y + current.height;
+    for screen in [
+        visible(),
+        Rect {
+            height: 900.,
+            ..visible()
+        },
+    ] {
+        for requested in [10., 450., 9999.] {
+            let resized = resized_frame(current, screen, requested);
+            assert_eq!(resized.y + resized.height, top);
+            assert_eq!((resized.x, resized.width), (current.x, current.width));
+            assert!((MIN_HEIGHT..=MAX_HEIGHT).contains(&resized.height));
+        }
+    }
+}
+
+#[test]
+fn fallback_button_help_matches_menu_only_behavior() {
+    assert_eq!(button_help(true), "Click to open the menu.");
+    assert_eq!(
+        button_help(false),
+        "Click for the sidebar. Control-click for the menu."
+    );
 }

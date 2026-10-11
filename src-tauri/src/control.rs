@@ -16,7 +16,7 @@ use crate::{
     commands::{launch_item, on_main_deferred},
     config::{ToolKind, TrayShow},
     lifecycle, omp_link, platform,
-    status::{Activity, Attention},
+    status::{item_status, Activity, Attention},
     workspace::{
         self, CloseOutcome, ItemState, OpenableSheet, PaletteMode, Process, WorkspaceState,
     },
@@ -217,7 +217,7 @@ fn project_item<'a>(state: &'a WorkspaceState, item: &'a ItemState, selected: bo
         tool_glyph: tool.map_or("", |t| t.glyph.as_str()),
         title: clip(&item.title),
         model: item.model.as_deref().map(model_short),
-        state: item_state(item),
+        state: item_status(item).name(),
         attention: if running { item.attention } else { None },
         unread: item.unread,
         selected,
@@ -245,19 +245,6 @@ fn project_item<'a>(state: &'a WorkspaceState, item: &'a ItemState, selected: bo
             }),
         exit_code: item.exit_code,
         cwd: &item.cwd,
-    }
-}
-
-/// The state word a plugin shows. A starting process is `starting`; an exited row is `exited`,
-/// or `error` for an agent that exited unsuccessfully or a launch that failed; a running item
-/// shows its activity (`unknown` for unmonitored agents, shells and Neovim: no pill).
-fn item_state(item: &ItemState) -> &'static str {
-    match item.process {
-        Process::Starting => "starting",
-        Process::Failed => "error",
-        Process::Exited if item.kind == ToolKind::Agent && item.exit_code != Some(0) => "error",
-        Process::Exited => "exited",
-        Process::Running => item.activity.name(),
     }
 }
 

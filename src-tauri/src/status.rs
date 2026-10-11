@@ -42,5 +42,37 @@ pub enum Attention {
     Approval,
     Question,
 }
+/// Shared sidebar/control/capsule classification: process facts take precedence over
+/// activity, including failed launches and unsuccessful agent exits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemStatus {
+    Starting,
+    Exited,
+    Activity(Activity),
+}
+
+impl ItemStatus {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Exited => "exited",
+            Self::Activity(activity) => activity.name(),
+        }
+    }
+}
+
+pub fn item_status(item: &crate::workspace::ItemState) -> ItemStatus {
+    use crate::{config::ToolKind, workspace::Process};
+    match item.process {
+        Process::Starting => ItemStatus::Starting,
+        Process::Failed => ItemStatus::Activity(Activity::Error),
+        Process::Exited if item.kind == ToolKind::Agent && item.exit_code != Some(0) => {
+            ItemStatus::Activity(Activity::Error)
+        }
+        Process::Exited => ItemStatus::Exited,
+        Process::Running => ItemStatus::Activity(item.activity),
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -192,11 +192,12 @@ fn workspace_snapshots_supply_tool_glyphs_and_the_bound_shortcuts() {
 }
 
 #[test]
-fn menu_bar_segments_exclude_shells_exited_items_and_seen_turns() {
-    let mut shell = item("shell", Activity::Working, 0);
+fn menu_bar_segments_exclude_busy_shells_clean_exits_and_seen_turns() {
+    let mut shell = item("shell", Activity::Unknown, 0);
     shell.kind = ToolKind::Terminal;
     let mut exited = item("exited", Activity::Error, 0);
     exited.process = Process::Exited;
+    exited.exit_code = Some(0);
     let mut starting = item("starting", Activity::Working, 0);
     starting.process = Process::Starting;
     let mut seen = item("seen", Activity::YourTurn, 0);
@@ -237,4 +238,35 @@ fn menu_bar_segments_include_items_beyond_the_three_menu_rows() {
     let tray = model(&items, true);
     assert_eq!(tray.entries.len(), 3);
     assert_eq!(tray.segments.on_job, 12);
+}
+
+#[test]
+fn capsule_errors_match_control_classification_for_failed_launches_and_exits() {
+    use crate::status::item_status;
+    for (kind, process, code, expected) in [
+        (ToolKind::Agent, Process::Failed, None, "error"),
+        (ToolKind::Terminal, Process::Failed, None, "error"),
+        (ToolKind::Agent, Process::Exited, Some(3), "error"),
+        (ToolKind::Agent, Process::Exited, None, "error"),
+        (ToolKind::Agent, Process::Exited, Some(0), "exited"),
+        (ToolKind::Terminal, Process::Exited, Some(3), "exited"),
+    ] {
+        let mut row = item("ended", Activity::Working, 0);
+        row.kind = kind;
+        row.process = process;
+        row.exit_code = code;
+        assert_eq!(item_status(&row).name(), expected);
+        let counts = model(&[row], true).segments;
+        assert_eq!(counts.error, usize::from(expected == "error"));
+        assert_eq!(
+            (
+                counts.working,
+                counts.on_job,
+                counts.needs_you,
+                counts.unread,
+                counts.running
+            ),
+            (0, 0, 0, 0, 0)
+        );
+    }
 }

@@ -92,9 +92,17 @@ pub fn click_route(
     }
 }
 
-/// Visible but fully covered is not useful to the user: h raises it rather than hiding it.
-pub fn toggle_hides_main(visible: bool, unoccluded: bool) -> bool {
-    visible && unoccluded
+/// Hidden, covered, or on another Space is not useful: h brings it to the current Space.
+pub fn toggle_hides_main(visible: bool, unoccluded: bool, on_active_space: bool) -> bool {
+    visible && unoccluded && on_active_space
+}
+
+pub fn button_help(menu_only: bool) -> &'static str {
+    if menu_only {
+        "Click to open the menu."
+    } else {
+        "Click for the sidebar. Control-click for the menu."
+    }
 }
 
 impl Tone {

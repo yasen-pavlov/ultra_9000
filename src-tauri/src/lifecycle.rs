@@ -427,11 +427,13 @@ pub fn toggle_main_inactive<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         )
     }
     .ok_or("main native window not found")?;
+    let on_active_space = native.isOnActiveSpace();
     let shown = crate::menubar::toggle_hides_main(
         native.isVisible(),
         native
             .occlusionState()
             .contains(NSWindowOcclusionState::Visible),
+        on_active_space,
     );
     if shown {
         workspace::invalidate_focus();
@@ -443,6 +445,11 @@ pub fn toggle_main_inactive<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         }
         if native.isMiniaturized() {
             native.deminiaturize(None);
+        }
+        if !on_active_space {
+            // Re-order an already-visible off-Space window so it comes to this Space
+            // instead of leaving the user's h action with no visible effect.
+            native.orderOut(None);
         }
         native.orderFrontRegardless();
     }

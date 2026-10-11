@@ -20,19 +20,26 @@ mod macos {
     use std::cell::{Cell, RefCell};
     use std::ffi::{c_void, CStr};
     use std::future::Future;
+    use std::path::{Path, PathBuf};
     use std::pin::Pin;
     use std::process::ExitCode;
     use std::rc::Rc;
+    use std::sync::mpsc;
     use std::task::{Context, Poll, Waker};
     use std::time::{Duration, Instant};
 
+    use block2::RcBlock;
+
     use objc2::rc::Retained;
-    use objc2::{msg_send, sel, MainThreadMarker};
+    use objc2::{class, msg_send, sel, AnyThread, MainThreadMarker};
     use objc2_app_kit::{
-        NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow, NSWindowButton,
-        NSWindowStyleMask, NSWindowTitleVisibility,
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+        NSApplication, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSEvent,
+        NSEventModifierFlags, NSEventType, NSImage, NSStatusBarButton, NSView, NSWindow,
+        NSWindowButton, NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
     };
-    use objc2_foundation::{NSPoint, NSString};
+    use objc2_foundation::{NSDictionary, NSError, NSNumber, NSObjectProtocol, NSPoint, NSString};
+    use serde_json::{json, Value};
     use tauri::{AppHandle, Manager, RunEvent, WebviewWindow};
     use ultra9000_app::testing;
 
@@ -348,8 +355,546 @@ mod macos {
             }
         }
 
+        popover_scenario(app, report, mtm, &ns_window).await;
+
         folder_picker(report, mtm);
         report.completed.set(true);
+    }
+
+    /// Real AppKit regression coverage; no sessions, fake windows, or substitute renderer.
+    async fn popover_scenario(
+        app: &AppHandle,
+        report: &Report,
+        mtm: MainThreadMarker,
+        main: &NSWindow,
+    ) {
+        let Some(window) = app.get_webview_window("popover") else {
+            report.check(
+                false,
+                "startup creates the popover (menu-only fallback must fail this test)",
+            );
+            return;
+        };
+        // SAFETY: the Tauri-owned native window remains alive through the complete scenario.
+        let Some(panel) = window
+            .ns_window()
+            .ok()
+            .and_then(|raw| unsafe { Retained::retain(raw.cast::<NSWindow>()) })
+        else {
+            report.check(false, "popover has a native NSWindow");
+            return;
+        };
+        let panel_class = objc2::runtime::AnyClass::get(c"U9KMenuBarPanel");
+        report.check(
+            panel_class.is_some_and(|class| panel.isKindOfClass(class)),
+            "popover is the production panel subclass, not a fallback NSWindow",
+        );
+        report.check(!panel.isVisible(), "popover starts hidden");
+        report.check(panel.hasShadow(), "popover has the native shadow");
+        let native_app = NSApplication::sharedApplication(mtm);
+        // Public AppKit deactivation is sufficient on the logged-in runner; we deliberately
+        // assert isActive=false before and after opening instead of excusing activation.
+        native_app.deactivate();
+        if !wait_for(report, "test application deactivated", || {
+            !native_app.isActive()
+        })
+        .await
+        {
+            return;
+        }
+        report.check(
+            testing::popover_show(app).is_ok(),
+            "native left-click show path opens the panel",
+        );
+        if !wait_for(report, "popover visible and key", || {
+            panel.isVisible() && panel.isKeyWindow()
+        })
+        .await
+        {
+            return;
+        }
+        report.check(
+            !native_app.isActive(),
+            "nonactivating panel takes key without activating NSApp",
+        );
+        report.check(
+            !main.isKeyWindow(),
+            "popover key does not give the main window key focus",
+        );
+        sleep(SETTLE).await; // Allow the bundled popover to subscribe and settle its layout.
+
+        if let Some(directory) = shot_directory(report) {
+            snapshot_popover(&window, &directory.join("popover-opened.png")).await;
+        }
+
+        let original_top = panel.frame().origin.y + panel.frame().size.height;
+        let bottom = panel
+            .screen()
+            .map_or(0., |screen| screen.visibleFrame().origin.y);
+        let available_height = (original_top - bottom - 8.).max(0.);
+        for (requested, expected) in [(1., 200.), (9999., 600.), (420., 420.)] {
+            let expected = f64::min(expected, available_height);
+            report.check(
+                testing::popover_set_height(app.clone(), requested)
+                    .await
+                    .is_ok(),
+                "real popover_set_height command succeeds",
+            );
+            let frame = panel.frame();
+            report.check(
+                (frame.size.height - expected).abs() < 0.5,
+                &format!(
+                    "popover height {requested} clamps to {expected}, got {}",
+                    frame.size.height
+                ),
+            );
+            report.check(
+                (frame.origin.y + frame.size.height - original_top).abs() < 0.5,
+                "visible resizing keeps the current top edge",
+            );
+        }
+
+        let reply = popover_reply(app, json!({"type":"jump_to_waiting"})).await;
+        report.check(reply == Ok(json!({"ok":false,"error":"nothing_waiting","message":"Nothing is waiting for you."})), &format!("popover_command failure round trip: {reply:?}"));
+        let reply = popover_reply(app, json!({"type":"set_window_visible","visible":false})).await;
+        report.check(
+            reply == Ok(json!({"ok":true,"visible":false})),
+            "popover_command success round trip hides only main",
+        );
+        if !wait_for(report, "main hidden by control command", || {
+            !main.isVisible()
+        })
+        .await
+        {
+            return;
+        }
+        report.check(
+            panel.isVisible() && panel.isKeyWindow(),
+            "main hide leaves popover open and key",
+        );
+        report.check(
+            testing::popover_toggle_main(app.clone()).await.is_ok(),
+            "popover_toggle_main shows main",
+        );
+        if !wait_for(
+            report,
+            "inactive main show and occlusion state settled",
+            || {
+                main.isVisible()
+                    && main.isOnActiveSpace()
+                    && main
+                        .occlusionState()
+                        .contains(NSWindowOcclusionState::Visible)
+            },
+        )
+        .await
+        {
+            return;
+        }
+        report.check(
+            panel.isKeyWindow() && !native_app.isActive(),
+            "inactive h show keeps panel key and app inactive",
+        );
+        report.check(
+            testing::popover_toggle_main(app.clone()).await.is_ok(),
+            "popover_toggle_main hides main",
+        );
+        if !wait_for(report, "inactive main hide", || !main.isVisible()).await {
+            return;
+        }
+        report.check(panel.isKeyWindow(), "inactive h hide keeps panel key");
+
+        report.check(
+            post_plain_key(mtm, &panel, 53, "\u{1b}"),
+            "plain Escape is posted to popover WebKit",
+        );
+        if !wait_for(report, "Escape invokes popover_hide", || !panel.isVisible()).await {
+            return;
+        }
+        report.check(
+            app.get_webview_window("popover").is_some(),
+            "Escape hides rather than destroys the panel",
+        );
+        report.check(
+            testing::popover_show(app).is_ok(),
+            "popover reopens for outside-click test",
+        );
+        if !wait_for(report, "reopened panel key", || {
+            panel.isVisible() && panel.isKeyWindow()
+        })
+        .await
+        {
+            return;
+        }
+        report.check(
+            post_outside_click(mtm),
+            "outside mouse-down is queued through the local AppKit monitor",
+        );
+        if !wait_for(report, "outside click dismisses popover", || {
+            !panel.isVisible()
+        })
+        .await
+        {
+            return;
+        }
+        report.check(
+            testing::popover_show(app).is_ok(),
+            "popover reopens for direct hide command",
+        );
+        report.check(
+            testing::popover_hide(app.clone()).await.is_ok(),
+            "real popover_hide command succeeds",
+        );
+        if !wait_for(report, "direct hide command dismisses panel", || {
+            !panel.isVisible()
+        })
+        .await
+        {
+            return;
+        }
+        let reply = popover_reply(app, json!({"type":"set_window_visible","visible":true})).await;
+        report.check(
+            reply == Ok(json!({"ok":true,"visible":true})),
+            "control show reply round trip activates main deliberately",
+        );
+        if !wait_for(report, "main restored after popover tests", || {
+            main.isVisible()
+        })
+        .await
+        {
+            return;
+        }
+        render_status_matrix(app, report, mtm).await;
+    }
+
+    async fn popover_reply(app: &AppHandle, value: Value) -> Result<Value, String> {
+        let command: testing::PopoverCommand =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
+        let reply = testing::popover_command(app.clone(), command).await?;
+        serde_json::to_value(reply).map_err(|error| error.to_string())
+    }
+
+    fn post_plain_key(
+        mtm: MainThreadMarker,
+        window: &NSWindow,
+        key_code: u16,
+        characters: &str,
+    ) -> bool {
+        let text = NSString::from_str(characters);
+        let Some(event) = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown, NSPoint::new(0., 0.), NSEventModifierFlags::empty(), 0.,
+            window.windowNumber(), None, &text, &text, false, key_code,
+        ) else { return false; };
+        NSApplication::sharedApplication(mtm).postEvent_atStart(&event, false);
+        true
+    }
+
+    fn post_outside_click(mtm: MainThreadMarker) -> bool {
+        // A windowNumber=0 event belongs to neither panel nor status window. This reaches
+        // the production local monitor without clicking a launcher button or spawning an item.
+        let Some(event) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::LeftMouseDown, NSPoint::new(0., 0.), NSEventModifierFlags::empty(),
+            0., 0, None, 1, 1, 1.,
+        ) else { return false; };
+        NSApplication::sharedApplication(mtm).postEvent_atStart(&event, false);
+        true
+    }
+
+    fn shot_directory(report: &Report) -> Option<PathBuf> {
+        let path = PathBuf::from(std::env::var_os("U9K_SHOT_DIR")?);
+        match std::fs::create_dir_all(&path) {
+            Ok(()) => Some(path),
+            Err(error) => {
+                report.check(false, &format!("create screenshot directory: {error}"));
+                None
+            }
+        }
+    }
+
+    async fn render_status_matrix(app: &AppHandle, report: &Report, mtm: MainThreadMarker) {
+        use testing::BarCounts;
+        let Some(tray) = app.tray_by_id("ultra9000") else {
+            report.check(false, "production status item exists");
+            return;
+        };
+        let pointer = tray
+            .with_inner_tray_icon(|inner| {
+                inner
+                    .ns_status_item()
+                    .and_then(|item| item.button(MainThreadMarker::new().unwrap()))
+                    .map_or(0, |button| Retained::as_ptr(&button) as usize)
+            })
+            .unwrap_or(0);
+        // SAFETY: the app-managed tray retains its real button throughout this main-thread
+        // scenario; no tray visibility change or deletion runs while this pointer is used.
+        let Some(button) =
+            (unsafe { Retained::retain((pointer as *mut c_void).cast::<NSStatusBarButton>()) })
+        else {
+            report.check(false, "native NSStatusBarButton is available");
+            return;
+        };
+        let shots = shot_directory(report);
+        let cases = [
+            (
+                "quiet",
+                BarCounts {
+                    running: 5,
+                    ..Default::default()
+                },
+                "Ultra 9000, nothing waiting, 5 running",
+            ),
+            (
+                "unread",
+                BarCounts {
+                    unread: 2,
+                    running: 5,
+                    ..Default::default()
+                },
+                "Ultra 9000, 2 unread, 5 running",
+            ),
+            (
+                "need-1",
+                BarCounts {
+                    needs_you: 1,
+                    running: 6,
+                    ..Default::default()
+                },
+                "Ultra 9000, 1 needs you, 6 running",
+            ),
+            (
+                "need-12",
+                BarCounts {
+                    needs_you: 12,
+                    running: 14,
+                    ..Default::default()
+                },
+                "Ultra 9000, 12 need you, 14 running",
+            ),
+            (
+                "working",
+                BarCounts {
+                    working: 2,
+                    running: 5,
+                    ..Default::default()
+                },
+                "Ultra 9000, 2 working, 5 running",
+            ),
+            (
+                "on-job",
+                BarCounts {
+                    on_job: 1,
+                    running: 5,
+                    ..Default::default()
+                },
+                "Ultra 9000, 1 on job, 5 running",
+            ),
+            (
+                "error",
+                BarCounts {
+                    error: 1,
+                    running: 5,
+                    ..Default::default()
+                },
+                "Ultra 9000, 1 error, 5 running",
+            ),
+            (
+                "all",
+                BarCounts {
+                    needs_you: 2,
+                    error: 1,
+                    working: 4,
+                    on_job: 2,
+                    unread: 3,
+                    running: 14,
+                },
+                "Ultra 9000, 2 need you, 1 error, 4 working, 2 on job, 3 unread, 14 running",
+            ),
+            (
+                "99-plus",
+                BarCounts {
+                    needs_you: 100,
+                    working: 101,
+                    running: 205,
+                    ..Default::default()
+                },
+                "Ultra 9000, 100 need you, 101 working, 205 running",
+            ),
+        ];
+        for (appearance_name, name) in [
+            ("aqua", unsafe { NSAppearanceNameAqua }),
+            ("dark-aqua", unsafe { NSAppearanceNameDarkAqua }),
+        ] {
+            let appearance = NSAppearance::appearanceNamed(name);
+            report.check(appearance.is_some(), &format!("{appearance_name} exists"));
+            button.setAppearance(appearance.as_deref());
+            sleep(POLL).await; // KVO must run independently of workspace publishes.
+            let mut quiet_width = 0.;
+            let mut single_width = 0.;
+            for (state, counts, label) in &cases {
+                report.check(
+                    testing::update_menu_bar_title(&tray, *counts).is_ok(),
+                    &format!("{appearance_name}/{state} rendered by native production entry"),
+                );
+                sleep(POLL).await;
+                let bounds = button.bounds();
+                if *state == "quiet" {
+                    quiet_width = bounds.size.width;
+                }
+                if *state == "working" {
+                    single_width = bounds.size.width;
+                }
+                if *state != "quiet" && *state != "unread" {
+                    report.check(
+                        bounds.size.width > quiet_width,
+                        &format!("{appearance_name}/{state} width grows beyond the quiet mark"),
+                    );
+                }
+                if *state == "all" {
+                    report.check(
+                        bounds.size.width > single_width,
+                        "all segments are wider than one working segment",
+                    );
+                }
+                // SAFETY: accessibilityLabel is an NSString* (nullable) getter on this live
+                // AppKit button; objc2 retains the returned value for the comparison.
+                let actual: Option<Retained<NSString>> =
+                    unsafe { msg_send![&*button, accessibilityLabel] };
+                report.check(
+                    actual.as_deref().map(NSString::to_string).as_deref() == Some(*label),
+                    &format!("{appearance_name}/{state} exact accessible label"),
+                );
+                match render_button_2x(&button) {
+                    Ok(bitmap) => {
+                        report.check(
+                            bitmap.pixelsWide() == (bounds.size.width * 2.).ceil() as isize,
+                            "status raster is 2x",
+                        );
+                        if let Some(directory) = &shots {
+                            report.check(
+                                write_bitmap(
+                                    &bitmap,
+                                    &directory
+                                        .join(format!("status-{state}-{appearance_name}.png")),
+                                )
+                                .is_ok(),
+                                &format!("write {state}/{appearance_name} PNG"),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        report.check(false, &format!("draw {state}/{appearance_name}: {error}"))
+                    }
+                }
+            }
+        }
+        button.setAppearance(None);
+        let _ = testing::update_menu_bar_title(&tray, BarCounts::default());
+        report.check(
+            NSApplication::sharedApplication(mtm).isActive(),
+            "main-window show leaves the app active after popover scenario",
+        );
+    }
+
+    fn render_button_2x(button: &NSStatusBarButton) -> Result<Retained<NSBitmapImageRep>, String> {
+        let bounds = button.bounds();
+        // SAFETY: null planes asks AppKit to own allocation; positive 2x dimensions,
+        // 8-bit interleaved RGBA and RGB color space match the bitmap's storage layout.
+        let bitmap = unsafe {
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(), std::ptr::null_mut(),
+                (bounds.size.width * 2.).ceil() as isize, (bounds.size.height * 2.).ceil() as isize,
+                8, 4, true, false, NSDeviceRGBColorSpace, 0, 0,
+            )
+        }.ok_or("unable to allocate 2x status bitmap")?;
+        bitmap.setSize(bounds.size);
+        let pointer = bitmap.bitmapData();
+        if pointer.is_null() {
+            return Err("status bitmap has no raster storage".into());
+        }
+        let length = usize::try_from(bitmap.bytesPerRow() * bitmap.pixelsHigh())
+            .map_err(|error| error.to_string())?;
+        // SAFETY: this bitmap owns length bytes of writable interleaved raster storage.
+        // Clear it first so a nonempty result proves drawing, not uninitialized allocation.
+        unsafe { std::ptr::write_bytes(pointer, 0, length) };
+        NSView::setNeedsDisplay(button, true);
+        // This forces actual AppKit text/attachment/image drawing, not just construction
+        // of an attributed string whose lazy NSImage handlers have never executed.
+        button.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+        // SAFETY: the newly allocated bitmap owns this interleaved buffer; cacheDisplay
+        // has completed synchronously and no mutation occurs during this read.
+        let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+        if bytes.iter().all(|byte| *byte == 0) {
+            return Err("status button rendered an empty bitmap".into());
+        }
+        Ok(bitmap)
+    }
+
+    fn write_bitmap(bitmap: &NSBitmapImageRep, path: &Path) -> Result<(), String> {
+        let properties = NSDictionary::new();
+        // SAFETY: the empty property dictionary has the correct generic key/value types;
+        // AppKit's encoder returns a retained immutable NSData.
+        let data = unsafe {
+            bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+        }
+        .ok_or("unable to encode PNG")?;
+        // SAFETY: this encoder-owned NSData is retained and never exposed to mutators;
+        // the borrow lasts only for the synchronous file write.
+        std::fs::write(path, unsafe { data.as_bytes_unchecked() })
+            .map_err(|error| error.to_string())
+    }
+
+    /// Optional artifact capture only. Lack of WK snapshot support does not skip any
+    /// behavioral assertion or status-button rasterization.
+    async fn snapshot_popover(window: &WebviewWindow, path: &Path) {
+        let (result, completed) = mpsc::channel();
+        let path = path.to_owned();
+        let queued = window.with_webview(move |webview| {
+            // SAFETY: Wry supplies a live WKWebView on main. WebKit is already loaded;
+            // WKSnapshotConfiguration inherits NSObject new, its setters take NSRect
+            // and NSNumber*, and takeSnapshot's retained block takes NSImage*, NSError*.
+            unsafe {
+                let configuration: Retained<objc2::runtime::AnyObject> = msg_send![class!(WKSnapshotConfiguration), new];
+                let view = &*webview.inner().cast::<NSView>();
+                let _: () = msg_send![&*configuration, setRect: view.bounds()];
+                let _: () = msg_send![&*configuration, setSnapshotWidth: &*NSNumber::new_f64(view.bounds().size.width * 2.)];
+                let block: RcBlock<dyn Fn(*mut NSImage, *mut NSError)> = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+                    let saved = if !error.is_null() {
+                        Err((&*error).localizedDescription().to_string())
+                    } else if let Some(image) = Retained::retain(image) {
+                        image.TIFFRepresentation().and_then(|data| NSBitmapImageRep::imageRepWithData(&data))
+                            .ok_or_else(|| "WK snapshot had no bitmap representation".to_owned())
+                            .and_then(|bitmap| write_bitmap(&bitmap, &path))
+                    } else { Err("WK snapshot returned no image".into()) };
+                    let _ = result.send(saved);
+                });
+                let _: () = msg_send![view, takeSnapshotWithConfiguration: &*configuration, completionHandler: &*block];
+            }
+        });
+        if let Err(error) = queued {
+            println!("gui_macos: skipping optional popover PNG: {error}");
+            return;
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match completed.try_recv() {
+                Ok(result) => {
+                    if let Err(error) = result {
+                        println!("gui_macos: skipping optional popover PNG: {error}");
+                    }
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    println!("gui_macos: skipping optional popover PNG: WK callback dropped");
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() > deadline {
+                println!("gui_macos: skipping optional popover PNG: WK snapshot timed out");
+                return;
+            }
+            sleep(POLL).await;
+        }
     }
 
     /// `kVK_ANSI_H`, the physical key the Hide shortcut (Cmd+H) is bound to.

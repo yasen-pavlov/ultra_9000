@@ -1,7 +1,7 @@
 //! Native vector attachments and SF Pro text. Geometry matches assets/icons/tray/*.svg.
 use super::{
-    accessibility_label, attachment_layout, color_components, pill_geometry, title_runs, Rect, Run,
-    Tone,
+    accessibility_label, attachment_layout, button_help, color_components, pill_geometry,
+    title_runs, Rect, Run, Tone,
 };
 use crate::tray_model::BarCounts;
 use block2::RcBlock;
@@ -20,7 +20,10 @@ use objc2_foundation::{
     NSArray, NSDictionary, NSKeyValueObservingOptions, NSMutableAttributedString, NSNumber,
     NSObject, NSObjectNSKeyValueObserverRegistration, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
-use std::{cell::RefCell, ffi::c_void};
+use std::{
+    cell::{Cell, RefCell},
+    ffi::c_void,
+};
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -58,6 +61,7 @@ impl Drop for StatusState {
 }
 thread_local! {
     static STATUS: RefCell<Option<StatusState>> = const { RefCell::new(None) };
+    static MENU_ONLY: Cell<bool> = const { Cell::new(false) };
     static MARKS: RefCell<[Option<Retained<NSImage>>; 2]> = const { RefCell::new([None, None]) };
     static INDICATORS: RefCell<[Option<Retained<NSImage>>; 4]> = const { RefCell::new([None, None, None, None]) };
     // SAFETY: AppKit's exported names are immutable process-lifetime NSStrings;
@@ -163,6 +167,24 @@ pub fn highlight(open: bool) {
             state.button.highlight(open);
         }
     });
+}
+
+pub(super) fn set_menu_only(menu_only: bool) {
+    MENU_ONLY.with(|mode| mode.set(menu_only));
+    STATUS.with(|cache| {
+        if let Some(state) = cache.borrow().as_ref() {
+            update_help(&state.button);
+        }
+    });
+}
+
+fn update_help(button: &NSStatusBarButton) {
+    let text = MENU_ONLY.with(|mode| button_help(mode.get()));
+    // SAFETY: this NSAccessibility setter copies NSString* and returns void; the retained
+    // status button and this temporary string are live on the main thread.
+    unsafe {
+        let _: () = msg_send![button, setAccessibilityHelp: &*NSString::from_str(text)];
+    }
 }
 
 fn rgb(hex: u32, alpha: f64) -> Retained<NSColor> {
@@ -433,6 +455,6 @@ fn update_accessibility(button: &NSStatusBarButton, counts: BarCounts) {
     // each value. This is the live retained status button on the main thread.
     unsafe {
         let _: () = msg_send![button, setAccessibilityLabel: &*label];
-        let _: () = msg_send![button, setAccessibilityHelp: &*NSString::from_str("Click for the sidebar. Control-click for the menu.")];
     }
+    update_help(button);
 }

@@ -274,6 +274,7 @@ pub fn recover_menu_only(app: &AppHandle) {
         {
             log::error!("Unable to restore the native left-click menu: {error}");
         }
+        super::render::set_menu_only(true);
     }
 }
 
@@ -482,7 +483,7 @@ fn position<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .map_err(|error| error.to_string())?
 }
 
-fn show<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+pub fn show<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     position(app)?;
     focus_panel(app)?;
     super::render::highlight(true);
@@ -529,21 +530,31 @@ pub fn hide<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn set_height<R: Runtime>(app: &AppHandle<R>, height: f64) -> Result<(), String> {
+pub fn set_height<R: Runtime>(_app: &AppHandle<R>, height: f64) -> Result<(), String> {
     main_thread();
-    let visible = PANEL.with(|state| {
+    PANEL.with(|state| {
         let mut state = state.borrow_mut();
         let state = state.as_mut().ok_or("popover is unavailable")?;
         state.height = height;
-        Ok::<bool, String>(state.panel.isVisible())
-    })?;
-    // The bundled hidden webview may lay out while [tray] show removes the status item.
-    // Save its content height now and anchor only when actually shown.
-    if visible {
-        position(app)
-    } else {
+        if state.panel.isVisible() {
+            let screen = state.panel.screen().ok_or("popover has no screen")?;
+            let frame = super::resized_frame(
+                rect(state.panel.frame()),
+                rect(screen.visibleFrame()),
+                height,
+            );
+            state.panel.setFrame_display(
+                NSRect::new(
+                    NSPoint::new(frame.x, frame.y),
+                    NSSize::new(frame.width, frame.height),
+                ),
+                true,
+            );
+            state.panel.invalidateShadow();
+        }
+        // Hidden layouts need no status item; show() alone computes a fresh bar anchor.
         Ok(())
-    }
+    })
 }
 
 /// One native rendering entry, cached by counts and the button's effectiveAppearance.

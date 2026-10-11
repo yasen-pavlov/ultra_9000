@@ -127,6 +127,8 @@ tauri = { version = "=2.12.1", features = ["test"] }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSEvent",
+    "NSBitmapImageRep",
+    "NSImageRep",
     "NSGraphicsContext",
     "NSMenu",
     "NSMenuItem",

@@ -103,7 +103,9 @@ The static capsule shows the U_ mark (with a dot for unread turns), an orange ne
 pill, red errors, a purple working arc and an on-job ring. Zero segments are omitted;
 counts above 99 display `99+`, while accessibility labels retain exact totals. Colours
 follow the menu bar's own light/dark appearance, and the capsule never animates. Busy
-shells, exited items and seen turns do not add status segments. In the popover, h toggles
+shells, successful agent exits, shell exits and seen turns do not add status segments;
+failed launches and unsuccessful/signalled agent exits add red errors, using the same
+classification as the control snapshot and Noctalia capsule. In the popover, h toggles
 the main window without taking focus; n/t/e create rows without closing the panel;
 selecting a row, j or o brings the main window forward. Popover focus never marks a turn
 seen: only main-window keyboard focus does. Linux keeps its existing tray behaviour.
