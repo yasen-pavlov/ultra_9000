@@ -146,14 +146,16 @@ pub struct Link {
 }
 
 impl Link {
-    /// Prepare `dir` (private to this user), write the extension and listen on the socket.
-    /// Token files of other runs are left alone: another instance may share `dir`. Each
-    /// delivery is handed to `deliver` from a connection thread.
+    /// Prepare `dir` (private to this user), remove the socket and extension of instances that
+    /// no longer run, write the extension and listen on the socket. Token files of other runs
+    /// are left alone: another instance may share `dir`. Each delivery is handed to `deliver`
+    /// from a connection thread.
     pub fn start(
         dir: &Path,
         deliver: impl Fn(Delivery) + Send + Sync + 'static,
     ) -> Result<Self, String> {
         private_dir(dir)?;
+        remove_dead_instances(dir);
         let extension = dir.join(format!("{EXTENSION_PREFIX}{}.ts", std::process::id()));
         write_atomically(&extension, EXTENSION.as_bytes())
             .map_err(|e| format!("cannot write {}: {e}", extension.display()))?;
@@ -419,6 +421,41 @@ fn private_dir(dir: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Remove the socket and extension of instances whose process is gone (killed or crashed
+/// before their own cleanup). A reused pid only keeps an old file, never removes a live one.
+fn remove_dead_instances(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(instance_pid) else {
+            continue;
+        };
+        // SAFETY: signal 0 only checks that the process exists; nothing is delivered.
+        let gone = unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The app pid in an instance's file name: `omp-<pid>.sock` or `ultra9000-status-<pid>.ts`.
+fn instance_pid(name: &str) -> Option<libc::pid_t> {
+    let digits = name
+        .strip_prefix("omp-")
+        .and_then(|rest| rest.strip_suffix(".sock"))
+        .or_else(|| {
+            name.strip_prefix(EXTENSION_PREFIX)
+                .and_then(|rest| rest.strip_suffix(".ts"))
+        })?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|pid| *pid > 0)
 }
 
 /// Replace `path` with `contents` (mode 0600) through a rename, so OMP never reads half a file.
