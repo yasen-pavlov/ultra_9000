@@ -6,6 +6,10 @@
 //! aborts it from a run-loop timer once it is the application's modal window. Starts no
 //! session. Needs a window server session; without one it is skipped, unless
 //! `U9K_REQUIRE_GUI_TESTS=1` makes that a failure.
+//!
+//! Build the frontend, then run with `--features tauri/custom-protocol`: popover keyboard
+//! assertions require the bundled Svelte UI (CI passes this flag). A plain GUI target with
+//! neither bundled assets nor a development server cannot exercise WebKit Escape.
 
 #[cfg(target_os = "macos")]
 fn main() -> std::process::ExitCode {
@@ -34,11 +38,14 @@ mod macos {
     use objc2::{class, msg_send, sel, AnyThread, MainThreadMarker};
     use objc2_app_kit::{
         NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-        NSApplication, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSEvent,
-        NSEventModifierFlags, NSEventType, NSImage, NSStatusBarButton, NSView, NSWindow,
-        NSWindowButton, NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
+        NSApplication, NSApplicationActivationOptions, NSBitmapImageFileType, NSBitmapImageRep,
+        NSDeviceRGBColorSpace, NSEvent, NSEventModifierFlags, NSEventType, NSImage,
+        NSRunningApplication, NSStatusBarButton, NSView, NSWindow, NSWindowButton,
+        NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
     };
-    use objc2_foundation::{NSDictionary, NSError, NSNumber, NSObjectProtocol, NSPoint, NSString};
+    use objc2_foundation::{
+        NSDictionary, NSError, NSNumber, NSObjectProtocol, NSPoint, NSProcessInfo, NSString,
+    };
     use serde_json::{json, Value};
     use tauri::{AppHandle, Manager, RunEvent, WebviewWindow};
     use ultra9000_app::testing;
@@ -331,10 +338,34 @@ mod macos {
             "reopened window is presentable",
         );
 
+        // Visibility alone does not imply focus/activation, especially when another CI
+        // step left Finder frontmost. Settle the same key/active precondition as a real Cmd+H.
+        report.check(
+            testing::show_window(app).is_ok(),
+            "explicitly restore main focus before Cmd+H",
+        );
+        report.check(
+            NSRunningApplication::currentApplication()
+                .activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows),
+            "main application activation requested",
+        );
+        if !wait_for(
+            report,
+            "main key and our application frontmost before Cmd+H",
+            || {
+                ns_window.isKeyWindow()
+                    && NSApplication::sharedApplication(mtm).isActive()
+                    && frontmost_pid() == Some(current_pid())
+            },
+        )
+        .await
+        {
+            return;
+        }
         // Cmd+H (physical H) in the main window goes through the application key router's
         // local event monitor to the Hide action, which hides the application.
         report.check(
-            post_key_down(mtm, &ns_window, KEY_H, "h"),
+            post_key_press(mtm, &ns_window, KEY_H, "h", NSEventModifierFlags::Command),
             "Cmd+H key event posted",
         );
         if wait_for(
@@ -391,22 +422,34 @@ mod macos {
         );
         report.check(!panel.isVisible(), "popover starts hidden");
         report.check(panel.hasShadow(), "popover has the native shadow");
-        let native_app = NSApplication::sharedApplication(mtm);
-        // Public AppKit deactivation is sufficient on the logged-in runner; we deliberately
-        // assert isActive=false before and after opening instead of excusing activation.
-        native_app.deactivate();
-        if !wait_for(report, "test application deactivated", || {
-            !native_app.isActive()
-        })
+        // Hand actual WindowServer foreground ownership to a known different app. Simply
+        // setting NSApp.isActive=false with deactivate() does not establish that contract.
+        let Some(finder) = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+            &NSString::from_str("com.apple.finder"),
+        )
+        .firstObject() else {
+            report.check(false, "logged-in GUI runner has Finder");
+            return;
+        };
+        let finder_pid = finder.processIdentifier();
+        report.check(
+            finder.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows),
+            "Finder activation requested",
+        );
+        if !wait_for(
+            report,
+            "Finder owns the foreground before the status click",
+            || frontmost_pid() == Some(finder_pid),
+        )
         .await
         {
             return;
         }
         report.check(
-            testing::popover_show(app).is_ok(),
-            "native left-click show path opens the panel",
+            post_status_click(app, mtm),
+            "first real status-button mouse down/up queued",
         );
-        if !wait_for(report, "popover visible and key", || {
+        if !wait_for(report, "first status click opens a key popover", || {
             panel.isVisible() && panel.isKeyWindow()
         })
         .await
@@ -414,14 +457,49 @@ mod macos {
             return;
         }
         report.check(
-            !native_app.isActive(),
-            "nonactivating panel takes key without activating NSApp",
+            frontmost_pid() == Some(finder_pid) && frontmost_pid() != Some(current_pid()),
+            "nonactivating status click keeps Finder foreground while the panel takes key",
         );
         report.check(
             !main.isKeyWindow(),
             "popover key does not give the main window key focus",
         );
         sleep(SETTLE).await; // Allow the bundled popover to subscribe and settle its layout.
+        report.check(
+            frontmost_pid() == Some(finder_pid),
+            "Finder stays foreground after the popover UI settles",
+        );
+        report.check(
+            post_status_click(app, mtm),
+            "second status-button mouse down/up queued",
+        );
+        if !wait_for(
+            report,
+            "second status click hides rather than reopens the panel",
+            || !panel.isVisible(),
+        )
+        .await
+        {
+            return;
+        }
+        // Let both halves of the press and deferred resign-key/toggle callbacks finish.
+        sleep(POLL).await;
+        report.check(
+            !panel.isVisible(),
+            "second-click dismissal survives its deferred callbacks",
+        );
+        report.check(
+            post_status_click(app, mtm),
+            "third status click queued to reopen",
+        );
+        if !wait_for(report, "third status click reopens a key panel", || {
+            panel.isVisible() && panel.isKeyWindow()
+        })
+        .await
+        {
+            return;
+        }
+        sleep(POLL).await;
 
         if let Some(directory) = shot_directory(report) {
             snapshot_popover(&window, &directory.join("popover-opened.png")).await;
@@ -492,8 +570,8 @@ mod macos {
             return;
         }
         report.check(
-            panel.isKeyWindow() && !native_app.isActive(),
-            "inactive h show keeps panel key and app inactive",
+            panel.isKeyWindow() && frontmost_pid() == Some(finder_pid),
+            "inactive h show keeps panel key and Finder foreground",
         );
         report.check(
             testing::popover_toggle_main(app.clone()).await.is_ok(),
@@ -505,7 +583,7 @@ mod macos {
         report.check(panel.isKeyWindow(), "inactive h hide keeps panel key");
 
         report.check(
-            post_plain_key(mtm, &panel, 53, "\u{1b}"),
+            post_key_press(mtm, &panel, 53, "\u{1b}", NSEventModifierFlags::empty()),
             "plain Escape is posted to popover WebKit",
         );
         if !wait_for(report, "Escape invokes popover_hide", || !panel.isVisible()).await {
@@ -574,18 +652,94 @@ mod macos {
         serde_json::to_value(reply).map_err(|error| error.to_string())
     }
 
-    fn post_plain_key(
+    fn current_pid() -> libc::pid_t {
+        libc::pid_t::try_from(std::process::id()).expect("process PID fits the platform pid_t")
+    }
+
+    fn frontmost_pid() -> Option<libc::pid_t> {
+        NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| app.processIdentifier())
+    }
+
+    fn post_key_press(
         mtm: MainThreadMarker,
-        window: &NSWindow,
+        expected: &NSWindow,
         key_code: u16,
         characters: &str,
+        modifiers: NSEventModifierFlags,
     ) -> bool {
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(window) = app
+            .keyWindow()
+            .filter(|window| std::ptr::eq(&**window, expected))
+        else {
+            return false;
+        };
         let text = NSString::from_str(characters);
-        let Some(event) = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-            NSEventType::KeyDown, NSPoint::new(0., 0.), NSEventModifierFlags::empty(), 0.,
-            window.windowNumber(), None, &text, &text, false, key_code,
-        ) else { return false; };
-        NSApplication::sharedApplication(mtm).postEvent_atStart(&event, false);
+        let timestamp = NSProcessInfo::processInfo().systemUptime();
+        let make = |kind| {
+            NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            kind, NSPoint::new(0., 0.), modifiers, timestamp, window.windowNumber(),
+            None, &text, &text, false, key_code,
+        )
+        };
+        let (Some(down), Some(up)) = (make(NSEventType::KeyDown), make(NSEventType::KeyUp)) else {
+            return false;
+        };
+        // Like hardware input, target the actual key window and deliver a whole press
+        // through AppKit's event queue/local monitors, never directly to WebKit.
+        app.postEvent_atStart(&down, false);
+        app.postEvent_atStart(&up, false);
+        true
+    }
+
+    fn status_button(app: &AppHandle) -> Option<Retained<NSStatusBarButton>> {
+        let tray = app.tray_by_id("ultra9000")?;
+        let pointer = tray
+            .with_inner_tray_icon(|inner| {
+                inner
+                    .ns_status_item()
+                    .and_then(|item| item.button(MainThreadMarker::new().unwrap()))
+                    .map_or(0, |button| Retained::as_ptr(&button) as usize)
+            })
+            .ok()?;
+        // SAFETY: the app-managed tray retains this real button; called synchronously on
+        // main while no tray visibility/removal operation can invalidate the pointer.
+        unsafe { Retained::retain((pointer as *mut c_void).cast::<NSStatusBarButton>()) }
+    }
+
+    fn post_status_click(app: &AppHandle, mtm: MainThreadMarker) -> bool {
+        let Some(button) = status_button(app) else {
+            return false;
+        };
+        let Some(window) = button.window() else {
+            return false;
+        };
+        let bounds = button.bounds();
+        let location = button.convertPoint_toView(
+            NSPoint::new(
+                bounds.origin.x + bounds.size.width / 2.,
+                bounds.origin.y + bounds.size.height / 2.,
+            ),
+            None,
+        );
+        let timestamp = NSProcessInfo::processInfo().systemUptime();
+        let make = |kind| {
+            NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind, location, NSEventModifierFlags::empty(), timestamp,
+            window.windowNumber(), None, 1, 1, 1.,
+        )
+        };
+        let (Some(down), Some(up)) = (
+            make(NSEventType::LeftMouseDown),
+            make(NSEventType::LeftMouseUp),
+        ) else {
+            return false;
+        };
+        let native = NSApplication::sharedApplication(mtm);
+        native.postEvent_atStart(&down, false);
+        native.postEvent_atStart(&up, false);
         true
     }
 
@@ -617,19 +771,7 @@ mod macos {
             report.check(false, "production status item exists");
             return;
         };
-        let pointer = tray
-            .with_inner_tray_icon(|inner| {
-                inner
-                    .ns_status_item()
-                    .and_then(|item| item.button(MainThreadMarker::new().unwrap()))
-                    .map_or(0, |button| Retained::as_ptr(&button) as usize)
-            })
-            .unwrap_or(0);
-        // SAFETY: the app-managed tray retains its real button throughout this main-thread
-        // scenario; no tray visibility change or deletion runs while this pointer is used.
-        let Some(button) =
-            (unsafe { Retained::retain((pointer as *mut c_void).cast::<NSStatusBarButton>()) })
-        else {
+        let Some(button) = status_button(app) else {
             report.check(false, "native NSStatusBarButton is available");
             return;
         };
@@ -720,6 +862,7 @@ mod macos {
                 "Ultra 9000, 100 need you, 101 working, 205 running",
             ),
         ];
+        let mut aqua_raster: Option<(isize, isize, Vec<u8>)> = None;
         for (appearance_name, name) in [
             ("aqua", unsafe { NSAppearanceNameAqua }),
             ("dark-aqua", unsafe { NSAppearanceNameDarkAqua }),
@@ -765,10 +908,30 @@ mod macos {
                 );
                 match render_button_2x(&button) {
                     Ok(bitmap) => {
-                        report.check(
-                            bitmap.pixelsWide() == (bounds.size.width * 2.).ceil() as isize,
-                            "status raster is 2x",
-                        );
+                        if *state == "all" {
+                            let bytes = bitmap_raster(&bitmap).expect("raster already validated");
+                            if appearance_name == "aqua" {
+                                aqua_raster = Some((
+                                    bitmap.pixelsWide(),
+                                    bitmap.pixelsHigh(),
+                                    bytes.to_vec(),
+                                ));
+                            } else if let Some((width, height, aqua)) = &aqua_raster {
+                                report.check(
+                                    (*width, *height) == (bitmap.pixelsWide(), bitmap.pixelsHigh()),
+                                    "appearance changes preserve raster geometry",
+                                );
+                                report.check(
+                                    aqua.as_slice() != bytes,
+                                    "Aqua and DarkAqua actually render different status pixels",
+                                );
+                            } else {
+                                report.check(
+                                    false,
+                                    "Aqua reference raster exists for the appearance comparison",
+                                );
+                            }
+                        }
                         if let Some(directory) = &shots {
                             report.check(
                                 write_bitmap(
@@ -820,13 +983,23 @@ mod macos {
         // This forces actual AppKit text/attachment/image drawing, not just construction
         // of an attributed string whose lazy NSImage handlers have never executed.
         button.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
-        // SAFETY: the newly allocated bitmap owns this interleaved buffer; cacheDisplay
-        // has completed synchronously and no mutation occurs during this read.
-        let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+        let bytes = bitmap_raster(&bitmap)?;
         if bytes.iter().all(|byte| *byte == 0) {
             return Err("status button rendered an empty bitmap".into());
         }
         Ok(bitmap)
+    }
+
+    fn bitmap_raster(bitmap: &NSBitmapImageRep) -> Result<&[u8], String> {
+        let pointer = bitmap.bitmapData();
+        if pointer.is_null() {
+            return Err("status bitmap has no raster storage".into());
+        }
+        let length = usize::try_from(bitmap.bytesPerRow() * bitmap.pixelsHigh())
+            .map_err(|error| error.to_string())?;
+        // SAFETY: this test owns the bitmap, cacheDisplay has completed synchronously,
+        // and no mutation occurs during the borrow of its interleaved backing buffer.
+        Ok(unsafe { std::slice::from_raw_parts(pointer, length) })
     }
 
     fn write_bitmap(bitmap: &NSBitmapImageRep, path: &Path) -> Result<(), String> {
@@ -899,33 +1072,6 @@ mod macos {
 
     /// `kVK_ANSI_H`, the physical key the Hide shortcut (Cmd+H) is bound to.
     const KEY_H: u16 = 4;
-
-    /// Queue a Cmd+`characters` key-down for `window` on the application's event queue, so it is
-    /// dequeued (and seen by local event monitors) like a real key press.
-    fn post_key_down(
-        mtm: MainThreadMarker,
-        window: &NSWindow,
-        key_code: u16,
-        characters: &str,
-    ) -> bool {
-        let characters = NSString::from_str(characters);
-        let Some(event) = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-            NSEventType::KeyDown,
-            NSPoint::new(0., 0.),
-            NSEventModifierFlags::Command,
-            0.,
-            window.windowNumber(),
-            None,
-            &characters,
-            &characters,
-            false,
-            key_code,
-        ) else {
-            return false;
-        };
-        NSApplication::sharedApplication(mtm).postEvent_atStart(&event, false);
-        true
-    }
 
     fn startup(
         report: &Report,
