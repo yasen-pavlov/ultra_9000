@@ -6,7 +6,7 @@ use std::{
     os::unix::fs::{symlink, PermissionsExt},
     path::Path,
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 /// A control server in its own runtime dir; `ok` decides each command's reply.
@@ -230,6 +230,7 @@ fn watch_relays_lines_reconnects_with_backoff_and_reports_each_drop_once() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_orphaned_watcher_exits_while_no_app_runs() {
     let (reader, writer) = io::pipe().unwrap();
@@ -250,8 +251,10 @@ fn an_orphaned_watcher_exits_while_no_app_runs() {
     assert_eq!(lines(&out), [json!({"type": "disconnected"})]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn waiting_notices_a_closed_reader_at_once_and_otherwise_times_out() {
+    use std::time::Instant;
     let (reader, writer) = io::pipe().unwrap();
     let started = Instant::now();
     assert!(reader_present(&writer, Duration::from_millis(100)));

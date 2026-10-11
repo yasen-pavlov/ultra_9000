@@ -13,12 +13,9 @@ use std::{
     ffi::OsString,
     fs,
     io::{self, BufRead, BufReader, Read, Write},
-    os::{
-        fd::{AsFd, AsRawFd},
-        unix::net::UnixStream,
-    },
+    os::{fd::AsFd, unix::net::UnixStream},
     path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 const USAGE: &str = "usage: ultra9000 ctl watch [--client NAME]\n       ultra9000 ctl <command> ['<json args object>']\n";
@@ -167,8 +164,12 @@ fn run_watch(
 }
 
 /// Wait up to `timeout` for the reading end of `out` to go away (a closed pipe or socket);
-/// false as soon as it has. A terminal or file never goes away.
+/// false as soon as it has. A terminal or file never goes away. Linux reports a pipe whose
+/// reader closed as a hang-up even when no events are requested; macOS does not, so there
+/// the watcher only notices on its next write (the shell plugin it serves is Linux-only).
+#[cfg(target_os = "linux")]
 fn reader_present(out: &impl AsFd, timeout: Duration) -> bool {
+    use std::{os::fd::AsRawFd, time::Instant};
     let deadline = Instant::now() + timeout;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -190,6 +191,11 @@ fn reader_present(out: &impl AsFd, timeout: Duration) -> bool {
             return true;
         }
     }
+}
+#[cfg(not(target_os = "linux"))]
+fn reader_present(_out: &impl AsFd, timeout: Duration) -> bool {
+    std::thread::sleep(timeout);
+    true
 }
 
 /// Copy lines from `stream` to `out`, flushing each, until the connection ends or goes
