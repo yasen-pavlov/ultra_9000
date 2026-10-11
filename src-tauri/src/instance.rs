@@ -210,11 +210,21 @@ fn prepare_runtime_dir(dir: &Path) -> Result<(), String> {
     omp_link::private_dir(dir).map_err(|error| {
         let details = fs::symlink_metadata(dir).map_or_else(
             |e| format!("cannot inspect ownership/mode: {e}"),
-            |meta| format!("owner uid {}, mode {:04o}, directory={} (must be your uid and a non-symlink directory with no group/other access)", meta.uid(), meta.mode() & 0o7777, meta.is_dir()),
+            |meta| {
+                // SAFETY: getuid has no preconditions and cannot fail.
+                let owner = if meta.uid() == unsafe { libc::getuid() } {
+                    "you"
+                } else {
+                    "another user"
+                };
+                format!(
+                    "owned by {owner}, mode {:04o}, directory={} (must be yours, not a symlink, with no group/other access)",
+                    meta.mode() & 0o7777,
+                    meta.is_dir()
+                )
+            },
         );
-        // SAFETY: getuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
-        format!("Cannot use instance runtime directory {}: {error}; {details}; your uid is {uid}. Set XDG_RUNTIME_DIR (Linux) or TMPDIR (macOS) to a private directory owned by you. If this is an abandoned/squatted directory, remove it only after ensuring no Ultra 9000 instance uses it; do not delete a live lock file.", dir.display())
+        format!("Cannot use instance runtime directory {}: {error}; {details}. Set XDG_RUNTIME_DIR (Linux) or TMPDIR (macOS) to a private directory owned by you. If this is an abandoned/squatted directory, remove it only after ensuring no Ultra 9000 instance uses it; do not delete a live lock file.", dir.display())
     })
 }
 

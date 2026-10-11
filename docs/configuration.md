@@ -19,7 +19,7 @@ If the owner is still starting or quitting, the launcher retries for up to 5 s. 
 
 Debug builds use `instance-debug.lock` and do not hand over to the installed release app. For an isolated run of either build profile, set `ULTRA9000_INSTANCE=<name>`: 1–32 characters drawn from lowercase ASCII letters, digits, `_` and `-`; invalid names fail before GUI startup. This selects `instance-<name>.lock` and disables the pre-lock fallback. Use a unique name for native test harnesses, alongside isolated config/state/data directories (the name isolates the instance lock, not settings or session stores). `ultra9000 ctl` never takes an instance lock.
 
-Startup fails rather than starting an unprotected instance if the runtime directory is not private. The error names its path, owner uid and mode: it must be a non-symlink directory owned by your uid, with no group/other access (normally mode 0700). Set `XDG_RUNTIME_DIR` on Linux, or `TMPDIR` on macOS, to a private directory owned by you. If the app's runtime directory is abandoned or squatted, remove it only after ensuring no Ultra 9000 instance is using it; never delete a live lock file.
+Startup fails rather than starting an unprotected instance if the runtime directory is not private. The error names its path, whether you own it, and its mode: it must be a non-symlink directory owned by you, with no group/other access (normally mode 0700). Set `XDG_RUNTIME_DIR` on Linux, or `TMPDIR` on macOS, to a private directory owned by you. If the app's runtime directory is abandoned or squatted, remove it only after ensuring no Ultra 9000 instance is using it; never delete a live lock file.
 
 ## Keyboard shortcuts
 

@@ -391,14 +391,14 @@ fn insecure_runtime_directory_reports_ownership_mode_and_recovery() {
     let error = prepare_runtime_dir(dir.path()).unwrap_err();
     for expected in [
         dir.path().to_str().unwrap(),
-        "owner uid",
+        "owned by you",
         "mode 0755",
         "XDG_RUNTIME_DIR",
         "TMPDIR",
         "remove it only after",
         "do not delete a live lock",
     ] {
-        assert!(error.contains(expected), "missing {expected} from {error}");
+        assert!(error.contains(expected), "missing {expected}");
     }
 }
 
