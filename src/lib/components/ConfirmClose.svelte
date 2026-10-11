@@ -4,7 +4,8 @@
   // pressing the close shortcut again confirms natively.
   import { clock } from "../clock.svelte";
   import { run } from "../errors.svelte";
-  import { basename, modelShort, spokenAge } from "../format";
+  import { closeQuestion } from "../confirm";
+  import { modelShort, spokenAge } from "../format";
   import { itemView } from "../items";
   import { itemClose, sheetClose, type CloseReason } from "../native";
   import { workspace } from "../workspace.svelte";
@@ -22,12 +23,17 @@
       : itemView(item, { tool: workspace.tool(item.tool), now: clock.now, home: workspace.state?.defaultCwd ?? "" }),
   );
   const label = $derived(item === null ? "" : workspace.toolLabel(item.tool));
-  // The executable label is stable even when zsh sets the terminal title to the job command.
-  const shellLabel = $derived(item === null ? "The shell" : basename(workspace.tool(item.tool)?.path ?? "") || label);
   const project = $derived(item === null ? "" : workspace.projectName(item.projectId));
   const closeLabel = $derived(workspace.shortcut("close"));
-  const endLabel = $derived(
-    reason === "foreground-job" ? "End shell" : reason === "neovim" ? "End Neovim" : "End agent",
+  const question = $derived(
+    closeQuestion({
+      item,
+      reason,
+      detail,
+      toolLabel: label,
+      toolPath: item === null ? null : (workspace.tool(item.tool)?.path ?? null),
+      project,
+    }),
   );
   const meta = $derived(
     item === null
@@ -74,51 +80,17 @@
         >
       {/if}
       <div>
-        <h2 id="confirm-title">End “{item?.title ?? "this item"}”?</h2>
+        <h2 id="confirm-title">{question.title}</h2>
         {#if meta !== ""}<div class="meta">{meta}</div>{/if}
       </div>
     </div>
     <div id="confirm-body" class="body">
-      {#if reason === "agent-working"}
-        <p>
-          {label} is in the middle of a turn. Ending now stops it:
-          <span class="strong">this turn's unfinished work is lost</span>. Changes it already wrote to files stay
-          written.
+      {#each question.body as paragraph, index (index)}
+        <p class:dim={paragraph.dim}>
+          {#each paragraph.parts as part, at (at)}{#if part.strong}<span class="strong">{part.text}</span
+              >{:else}{part.text}{/if}{/each}
         </p>
-        <p class="dim">
-          The conversation up to the last completed turn stays saved in {project}, so you can resume it.
-        </p>
-      {:else if reason === "agent-needs-you"}
-        <p>
-          {label} is waiting for your {item?.attention === "question"
-            ? "answer to a question"
-            : item?.attention === "approval"
-              ? "approval"
-              : "reply"}. Ending now drops that pending turn: <span class="strong">its unfinished work is lost</span>.
-          Changes it already wrote to files stay written.
-        </p>
-        <p class="dim">
-          The conversation up to the last completed turn stays saved in {project}, so you can resume it.
-        </p>
-      {:else if reason === "foreground-job"}
-        <p>
-          {shellLabel} is running <span class="strong">{detail ?? "a foreground job"}</span>. Ending the shell ends that
-          job too, and the screen and scrollback are gone. <span class="strong">This can't be undone.</span>
-        </p>
-      {:else if reason === "neovim"}
-        <p>
-          Neovim may hold unsaved buffers that Ultra 9000 cannot see. Ending it sends a hangup: <span class="strong"
-            >unsaved changes may be lost</span
-          >.
-        </p>
-        <p class="dim">Neovim's own swap files may help recover them.</p>
-      {:else}
-        <p>
-          {label} reports no turn state, so Ultra 9000 can't tell whether it is in the middle of something. Ending it stops
-          the process.
-        </p>
-        <p class="dim">{label} keeps its own saved conversation; resume it from the palette.</p>
-      {/if}
+      {/each}
     </div>
     <div class="acts">
       <button
@@ -134,7 +106,7 @@
         disabled={item === null}
         onclick={() => run("Close", () => itemClose(itemId, true))}
       >
-        {endLabel}{#if closeLabel !== null}<kbd>{closeLabel}</kbd>{/if}
+        {question.endLabel}{#if closeLabel !== null}<kbd>{closeLabel}</kbd>{/if}
       </button>
     </div>
   </div>

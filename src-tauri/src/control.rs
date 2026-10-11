@@ -410,7 +410,8 @@ pub enum Command {
         desktop_startup_id: Option<String>,
     },
     NewItem {
-        project_id: String,
+        #[serde(default)]
+        project_id: Option<String>,
         kind: NewKind,
         #[serde(default)]
         tool: Option<String>,
@@ -418,6 +419,8 @@ pub enum Command {
     OpenPalette {
         #[serde(default)]
         project_id: Option<String>,
+        #[serde(default)]
+        mode: Option<PaletteMode>,
     },
     CloseItem {
         item_id: String,
@@ -565,31 +568,37 @@ pub async fn execute<R: Runtime>(app: AppHandle<R>, command: Command) -> Result<
             kind,
             tool,
         } => {
-            let project = project_id.clone();
-            let default =
-                on_main(move || Ok(workspace::listed_project_default_tool(&project)?)).await?;
-            let Some(default) = default else {
-                return Err(Failure::new(
-                    "unknown_project",
-                    format!("Project {project_id} is not in the sidebar."),
-                ));
-            };
+            let (cwd, default) = on_main(move || {
+                if let Some(project) = project_id {
+                    let default =
+                        workspace::listed_project_default_tool(&project)?.ok_or_else(|| {
+                            Failure::new(
+                                "unknown_project",
+                                format!("Project {project} is not in the sidebar."),
+                            )
+                        })?;
+                    Ok((project, default))
+                } else {
+                    Ok(workspace::default_launch()?)
+                }
+            })
+            .await?;
             let tool = match kind {
                 NewKind::Agent => tool.unwrap_or(default),
                 NewKind::Shell => "shell".into(),
                 NewKind::Neovim => "neovim".into(),
             };
-            match launch_item(tool, project_id, None, None).await {
+            match launch_item(tool, cwd, None, None).await {
                 Ok(id) => Ok(done([("itemId", json!(id))])),
                 Err(message) => Err(Failure::new("launch_failed", message)),
             }
         }
-        Command::OpenPalette { project_id } => {
+        Command::OpenPalette { project_id, mode } => {
             on_main(move || {
                 lifecycle::show_window(&app)?;
                 workspace::sheet_open(OpenableSheet::Palette {
                     project_id,
-                    mode: PaletteMode::Open,
+                    mode: mode.unwrap_or(PaletteMode::Open),
                 })?;
                 Ok(Done::new())
             })

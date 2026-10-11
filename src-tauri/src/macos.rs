@@ -204,9 +204,13 @@ pub fn application_hidden() -> bool {
 /// that fallback, so each chord executes once. Router actions must defer mutations.
 pub fn install_key_router(window: Retained<NSWindow>, router: Rc<dyn Fn(&AppKey) -> bool>) {
     let filter_router = router.clone();
+    let filter_window = window.clone();
     embed::set_application_shortcut_filter(Box::new(move |key| {
         let app = NSApplication::sharedApplication(main_thread());
-        !ModalGuard::is_held() && app.modalWindow().is_none() && filter_router(key)
+        let in_main = app.keyWindow().is_some_and(|key_window| {
+            Retained::as_ptr(&key_window) == Retained::as_ptr(&filter_window)
+        });
+        in_main && !ModalGuard::is_held() && app.modalWindow().is_none() && filter_router(key)
     }));
     let block: RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent> =
         RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
@@ -216,7 +220,10 @@ pub fn install_key_router(window: Retained<NSWindow>, router: Rc<dyn Fn(&AppKey)
             let in_window = event_ref.window(mtm).is_some_and(|event_window| {
                 Retained::as_ptr(&event_window) == Retained::as_ptr(&window)
             });
-            if !in_window
+            let in_popover = event_ref
+                .window(mtm)
+                .is_some_and(|window| crate::menubar::is_popover_window(&window));
+            if (!in_window && !in_popover)
                 || ModalGuard::is_held()
                 || app.modalWindow().is_some()
                 || event_ref.r#type() != NSEventType::KeyDown
@@ -224,7 +231,15 @@ pub fn install_key_router(window: Retained<NSWindow>, router: Rc<dyn Fn(&AppKey)
                 return event.as_ptr();
             }
             // SAFETY: AppKit passes a live event to the monitor on the main thread.
-            if router(&unsafe { embed::app_key_from_macos_event(event.cast()) }) {
+            let key = unsafe { embed::app_key_from_macos_event(event.cast()) };
+            // Plain popover letters/Esc belong to WebKit. Keep only the app's Quit chord
+            // available here, since the front app retains its own menus while inactive.
+            if in_popover
+                && crate::workspace::key_action(&key) != Some(crate::shortcuts::Action::Quit)
+            {
+                return event.as_ptr();
+            }
+            if router(&key) {
                 std::ptr::null_mut()
             } else {
                 event.as_ptr()

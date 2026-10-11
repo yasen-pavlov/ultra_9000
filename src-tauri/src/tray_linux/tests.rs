@@ -43,7 +43,10 @@ fn model(visible: bool, needs_you: usize, more_running: usize) -> TrayModel {
         more_running,
         visible,
         notify_checked: true,
-        needs_you,
+        segments: crate::tray_model::BarCounts {
+            needs_you,
+            ..Default::default()
+        },
         tooltip: "Ultra 9000 · 1 need you".into(),
         hide_shortcut: Some("Ctrl+Shift+H".into()),
         quit_shortcut: Some("Ctrl+Shift+Q".into()),
@@ -176,13 +179,13 @@ fn status_and_icon_follow_attention_and_icon_theme() {
     assert!(same(&tray.icon_pixmap(), &light.normal));
     assert!(same(&tray.attention_icon_pixmap(), &light.attention));
 
-    tray.model.needs_you = 2;
+    tray.model.segments.needs_you = 2;
     assert_eq!(tray.status(), Status::NeedsAttention);
     assert!(same(&tray.icon_pixmap(), &light.attention));
 
     tray.model.dark_icon = true;
     assert!(same(&tray.icon_pixmap(), &dark.attention));
     assert!(same(&tray.attention_icon_pixmap(), &dark.attention));
-    tray.model.needs_you = 0;
+    tray.model.segments.needs_you = 0;
     assert!(same(&tray.icon_pixmap(), &dark.normal));
 }

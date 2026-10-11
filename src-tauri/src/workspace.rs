@@ -162,7 +162,7 @@ pub enum OpenableSheet {
     Settings,
     Shortcuts,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PaletteMode {
     Open,
@@ -420,6 +420,13 @@ impl Host for Native {
             .is_some_and(platform::window_presentable)
     }
     fn window_focused(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self
+            .window
+            .borrow()
+            .as_ref()
+            .is_some_and(|window| window.isKeyWindow());
+        #[cfg(target_os = "linux")]
         self.app
             .get_webview_window(crate::lifecycle::MAIN_WINDOW)
             .is_some_and(|win| win.is_focused().unwrap_or(false))
@@ -1050,6 +1057,12 @@ pub fn select(id: &str) -> Result<(), String> {
 pub fn has_item(id: &str) -> Result<bool, String> {
     with(|w| Ok(w.index(id).is_ok()))
 }
+/// Empty menu-bar popovers launch in the configured default directory/tool, not an arbitrary
+/// unlisted project or whichever live item happens to be selected in another window.
+pub fn default_launch() -> Result<(String, String), String> {
+    with(|w| Ok((w.default_cwd.clone(), w.settings.default_tool.clone())))
+}
+
 /// The default tool of a project the sidebar lists, `None` for any other project id.
 pub fn listed_project_default_tool(project_id: &str) -> Result<Option<String>, String> {
     with(|w| {

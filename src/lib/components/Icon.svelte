@@ -16,7 +16,9 @@
     | "error"
     | "alert"
     | "warning"
-    | "panel";
+    | "panel"
+    | "jump"
+    | "window";
 </script>
 
 <script lang="ts">
@@ -72,5 +74,9 @@
     <path d="M8 2.5 14 13H2z" /><path d="M8 6.5v3M8 11.2v.01" />
   {:else if name === "panel"}
     <rect x="2" y="3" width="12" height="10" rx="2" />
+  {:else if name === "jump"}
+    <path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3.5 13.5h9" />
+  {:else if name === "window"}
+    <rect x="2" y="3" width="12" height="10" rx="2" /><path d="M2 6.2h12" />
   {/if}
 </svg>

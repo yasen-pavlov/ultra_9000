@@ -17,6 +17,7 @@ mod linux;
 mod logger;
 #[cfg(target_os = "macos")]
 mod macos;
+mod menubar;
 mod notify;
 mod omp_link;
 mod runtime;
@@ -135,6 +136,10 @@ fn app() -> App {
             commands::terminal_focus,
             commands::app_hide,
             commands::app_request_quit,
+            commands::popover_command,
+            commands::popover_hide,
+            commands::popover_set_height,
+            commands::popover_toggle_main,
         ])
         .setup(|app| {
             omp_link::start();
@@ -147,6 +152,8 @@ fn app() -> App {
             lifecycle::install_shortcuts(&window)?;
             attach_terminal_host(&window)?;
             lifecycle::install_menu_bar_icon(app)?;
+            #[cfg(target_os = "macos")]
+            menubar::create(app)?;
             Ok(())
         })
         .build(tauri::generate_context!())

@@ -21,6 +21,56 @@ pub struct Entry {
     pub detail: String,
 }
 
+/// Static menu-bar segments. Only live agents contribute; busy shells, exited items and
+/// already-seen turns deliberately do not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BarCounts {
+    pub needs_you: usize,
+    pub working: usize,
+    pub on_job: usize,
+    pub error: usize,
+    pub unread: usize,
+    pub running: usize,
+}
+
+impl BarCounts {
+    /// The actual visible title, excluding exact accessibility-only totals. Capped counts
+    /// and multiple unread turns must not redraw unchanged glyphs.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn title_key(&self) -> ([usize; 4], bool) {
+        (
+            [
+                self.needs_you.min(100),
+                self.error.min(100),
+                self.working.min(100),
+                self.on_job.min(100),
+            ],
+            self.unread > 0,
+        )
+    }
+
+    fn from_items(items: &[ItemState]) -> Self {
+        let mut counts = Self::default();
+        for item in items {
+            if item.process == Process::Running {
+                counts.running += 1;
+            }
+            if item.kind != ToolKind::Agent || item.process != Process::Running {
+                continue;
+            }
+            match item.activity {
+                Activity::NeedsYou(_) => counts.needs_you += 1,
+                Activity::Working => counts.working += 1,
+                Activity::OnJob => counts.on_job += 1,
+                Activity::Error => counts.error += 1,
+                Activity::YourTurn => counts.unread += usize::from(item.unread),
+                Activity::Unknown => {}
+            }
+        }
+        counts
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayModel {
     pub header: String,
@@ -28,7 +78,7 @@ pub struct TrayModel {
     pub more_running: usize,
     pub visible: bool,
     pub notify_checked: bool,
-    pub needs_you: usize,
+    pub segments: BarCounts,
     pub tooltip: String,
     pub hide_shortcut: Option<String>,
     pub quit_shortcut: Option<String>,
@@ -79,10 +129,8 @@ impl TrayModel {
             .filter(|i| i.process == Process::Running)
             .collect();
         let count = running.len();
-        let needs_you = running
-            .iter()
-            .filter(|i| matches!(i.activity, Activity::NeedsYou(_)))
-            .count();
+        let segments = BarCounts::from_items(items);
+        let needs_you = segments.needs_you;
         running.sort_by_key(|i| {
             let group = if matches!(i.activity, Activity::NeedsYou(_)) {
                 0
@@ -121,7 +169,7 @@ impl TrayModel {
             more_running: count.saturating_sub(3),
             visible,
             notify_checked,
-            needs_you,
+            segments,
             tooltip: if needs_you > 0 {
                 format!("Ultra 9000 · {needs_you} need you")
             } else {
@@ -142,8 +190,9 @@ impl TrayModel {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub fn attention(&self) -> bool {
-        self.needs_you > 0
+        self.segments.needs_you > 0
     }
 }
 

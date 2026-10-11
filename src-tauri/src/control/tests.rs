@@ -449,7 +449,7 @@ fn every_command_decodes_its_arguments_and_defaults() {
     assert_eq!(
         decode(r#"{"type":"new_item","id":1,"projectId":"/p","kind":"neovim"}"#),
         Ok(Command::NewItem {
-            project_id: "/p".into(),
+            project_id: Some("/p".into()),
             kind: NewKind::Neovim,
             tool: None
         })
@@ -457,14 +457,25 @@ fn every_command_decodes_its_arguments_and_defaults() {
     assert_eq!(
         decode(r#"{"type":"new_item","id":1,"projectId":"/p","kind":"agent","tool":"claude"}"#),
         Ok(Command::NewItem {
-            project_id: "/p".into(),
+            project_id: Some("/p".into()),
             kind: NewKind::Agent,
             tool: Some("claude".into())
         })
     );
     assert_eq!(
+        decode(r#"{"type":"new_item","id":1,"kind":"shell"}"#),
+        Ok(Command::NewItem {
+            project_id: None,
+            kind: NewKind::Shell,
+            tool: None
+        })
+    );
+    assert_eq!(
         decode(r#"{"type":"open_palette","id":1}"#),
-        Ok(Command::OpenPalette { project_id: None })
+        Ok(Command::OpenPalette {
+            project_id: None,
+            mode: None
+        })
     );
     assert_eq!(
         decode(r#"{"type":"close_item","id":1,"itemId":"item-2"}"#),
@@ -871,7 +882,7 @@ mod commands {
         let project = f.project("atlas");
         assert_eq!(
             f.run(Command::NewItem {
-                project_id: project.clone(),
+                project_id: Some(project.clone()),
                 kind: NewKind::Shell,
                 tool: None
             })
@@ -888,7 +899,7 @@ mod commands {
         ] {
             let id = f
                 .run(Command::NewItem {
-                    project_id: project.clone(),
+                    project_id: Some(project.clone()),
                     kind,
                     tool: None,
                 })
@@ -909,7 +920,7 @@ mod commands {
         }
         let failure = f
             .run(Command::NewItem {
-                project_id: project.clone(),
+                project_id: Some(project.clone()),
                 kind: NewKind::Agent,
                 tool: Some("nope".into()),
             })
@@ -918,6 +929,32 @@ mod commands {
             (failure.error, failure.message.as_str()),
             ("launch_failed", "Unknown tool: nope")
         );
+    }
+
+    #[test]
+    fn new_item_without_a_project_uses_launch_defaults_for_each_kind() {
+        let f = setup();
+        let cwd = f.state().default_cwd;
+        for (kind, tool) in [
+            (NewKind::Agent, "omp"),
+            (NewKind::Shell, "shell"),
+            (NewKind::Neovim, "neovim"),
+        ] {
+            let reply = f
+                .run(Command::NewItem {
+                    project_id: None,
+                    kind,
+                    tool: None,
+                })
+                .unwrap();
+            let prepared = f.host.prepared.borrow().last().cloned().unwrap();
+            assert_eq!(prepared.id, reply["itemId"].as_str().unwrap());
+            assert_eq!(prepared.tool, tool);
+            assert_eq!(
+                prepared.cwd,
+                std::fs::canonicalize(&cwd).unwrap().to_string_lossy()
+            );
+        }
     }
 
     #[test]
@@ -979,11 +1016,12 @@ mod commands {
         let (shell, _) = f.running("shell", &project);
         f.run(Command::OpenPalette {
             project_id: Some(project.clone()),
+            mode: Some(PaletteMode::New),
         })
         .unwrap();
         assert!(matches!(
             &f.state().sheet,
-            Some(Sheet::Palette { project_id: Some(p), .. }) if *p == project
+            Some(Sheet::Palette { project_id: Some(p), mode: PaletteMode::New }) if *p == project
         ));
         assert!(lifecycle::window_visible());
         f.run(Command::RequestQuit {}).unwrap();

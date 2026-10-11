@@ -190,3 +190,51 @@ fn workspace_snapshots_supply_tool_glyphs_and_the_bound_shortcuts() {
     assert_eq!(tray.quit_shortcut, keys.label(Action::Quit));
     assert!(tray.hide_shortcut.is_some() && tray.quit_shortcut.is_some());
 }
+
+#[test]
+fn menu_bar_segments_exclude_shells_exited_items_and_seen_turns() {
+    let mut shell = item("shell", Activity::Working, 0);
+    shell.kind = ToolKind::Terminal;
+    let mut exited = item("exited", Activity::Error, 0);
+    exited.process = Process::Exited;
+    let mut starting = item("starting", Activity::Working, 0);
+    starting.process = Process::Starting;
+    let mut seen = item("seen", Activity::YourTurn, 0);
+    seen.unread = false;
+    let items = [
+        item("approval", Activity::NeedsYou(Attention::Approval), 0),
+        item("question", Activity::NeedsYou(Attention::Question), 0),
+        item("working", Activity::Working, 0),
+        item("job", Activity::OnJob, 0),
+        item("error", Activity::Error, 0),
+        seen,
+        shell,
+        exited,
+        starting,
+    ];
+    let segments = model(&items, true).segments;
+    assert_eq!(
+        segments,
+        BarCounts {
+            needs_you: 2,
+            working: 1,
+            on_job: 1,
+            error: 1,
+            unread: 0,
+            running: 7,
+        }
+    );
+    let unread = item("unread", Activity::YourTurn, 0);
+    assert_eq!(model(&[unread], true).segments.unread, 1);
+    assert_eq!(model(&[], true).segments, BarCounts::default());
+}
+
+#[test]
+fn menu_bar_segments_include_items_beyond_the_three_menu_rows() {
+    let items: Vec<_> = (0..12)
+        .map(|n| item(&n.to_string(), Activity::OnJob, n))
+        .collect();
+    let tray = model(&items, true);
+    assert_eq!(tray.entries.len(), 3);
+    assert_eq!(tray.segments.on_job, 12);
+}

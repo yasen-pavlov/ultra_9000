@@ -94,6 +94,20 @@ show = "auto" # auto (default) | always | never
 
 `never` removes the tray icon (Linux StatusNotifierItem, macOS menu-bar item) and `always` keeps it. `auto` shows it except while a desktop-shell plugin watches the app over the control link below: the icon is withdrawn when the first watcher connects and returns 5 s after the last one disconnects, so a crashed or removed plugin never leaves a hidden window without a way back. Changes apply live.
 
+On macOS, left-clicking the menu-bar item toggles a keyboard-focused popover without
+activating the app or bringing its main window forward. Right-click or Ctrl-click opens
+the existing native tray menu. Esc, click-away, changing Spaces, or hiding the menu-bar
+item dismisses the popover without ending any item. The panel is anchored below the status
+button on its own display and its content height is clamped to the available screen area.
+The static capsule shows the U_ mark (with a dot for unread turns), an orange needs-you
+pill, red errors, a purple working arc and an on-job ring. Zero segments are omitted;
+counts above 99 display `99+`, while accessibility labels retain exact totals. Colours
+follow the menu bar's own light/dark appearance, and the capsule never animates. Busy
+shells, exited items and seen turns do not add status segments. In the popover, h toggles
+the main window without taking focus; n/t/e create rows without closing the panel;
+selecting a row, j or o brings the main window forward. Popover focus never marks a turn
+seen: only main-window keyboard focus does. Linux keeps its existing tray behaviour.
+
 ### Control link
 
 The running app listens on a private local socket (`control-<pid>.sock` next to the OMP status link: `$XDG_RUNTIME_DIR/ultra-9000/` on Linux, the per-user temp directory on macOS) that a shell plugin such as Noctalia's `muty/ultra9000` uses through the app's own command-line client, which never starts the app:

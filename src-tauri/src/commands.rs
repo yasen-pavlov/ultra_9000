@@ -52,6 +52,56 @@ async fn io<T: Send + 'static>(
         .await
         .map_err(|e| e.to_string())?
 }
+/// Execute the same command objects and preserve the same reply fields as the control link.
+#[tauri::command]
+pub async fn popover_command<R: Runtime>(
+    app: AppHandle<R>,
+    command: crate::control::Command,
+) -> Result<crate::menubar::Reply, String> {
+    let result = if matches!(command, crate::control::Command::RequestQuit {}) {
+        Err(crate::control::Failure {
+            error: "unsupported_command",
+            message: "Quit is not a popover command.".into(),
+        })
+    } else {
+        crate::control::execute(app, command).await
+    };
+    Ok(result.into())
+}
+
+#[tauri::command]
+pub async fn popover_hide<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return on_main_deferred(move || crate::menubar::hide(&app)).await?;
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        Err("The menu-bar popover is available only on macOS.".into())
+    }
+}
+
+#[tauri::command]
+pub async fn popover_set_height<R: Runtime>(app: AppHandle<R>, height: f64) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return on_main_deferred(move || crate::menubar::set_height(&app, height)).await?;
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (app, height);
+        Err("The menu-bar popover is available only on macOS.".into())
+    }
+}
+
+#[tauri::command]
+pub async fn popover_toggle_main<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return on_main_deferred(move || lifecycle::toggle_main_inactive(&app)).await?;
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        Err("The menu-bar popover is available only on macOS.".into())
+    }
+}
+
 #[tauri::command]
 pub fn workspace_state<R: Runtime>(app: AppHandle<R>) -> Result<WorkspaceState, String> {
     on_main(&app, workspace::snapshot)?
