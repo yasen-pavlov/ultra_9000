@@ -399,8 +399,7 @@
     {:else}
       {#each hints as hint, index (hint.label)}
         <span data-hint hidden={index >= hintsShown}
-          >{#each hint.keys as key, at (at)}{#if at > 0 && hint.joiner !== undefined}{hint.joiner}{/if}<kbd>{key}</kbd
-            >{/each}{hint.label}</span
+          >{#each hint.keys as key, at (at)}<kbd>{key}</kbd>{/each}{hint.label}</span
         >
       {/each}
     {/if}

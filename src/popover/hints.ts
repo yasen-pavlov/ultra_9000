@@ -2,9 +2,8 @@
 // or clips; trailing hints are dropped instead, most important first.
 
 export interface Hint {
-  /** Keycaps, in order ("1", "9" with `joiner` "–" reads 1–9). */
+  /** Keycaps, in order. */
   keys: string[];
-  joiner?: string;
   label: string;
 }
 
@@ -13,7 +12,7 @@ export const LIST_HINTS: readonly Hint[] = [
   { keys: ["j"], label: "jump" },
   { keys: ["n"], label: "new" },
   { keys: ["w"], label: "close" },
-  { keys: ["1", "9"], joiner: "–", label: "row" },
+  { keys: ["1–9"], label: "row" },
 ];
 
 export const EMPTY_HINTS: readonly Hint[] = [
