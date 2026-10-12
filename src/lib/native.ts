@@ -327,6 +327,47 @@ export function listenUiCommand(handler: (command: UiCommand) => void): Promise<
   return listen<UiCommand>(UI_COMMAND_EVENT, (event) => handler(event.payload));
 }
 
+/** Emitted to the popover only on each native show, after it has been anchored. */
+export function listenPopoverOpened(handler: () => void): Promise<UnlistenFn> {
+  return listen<Record<string, never>>("popover-opened", () => handler());
+}
+
+export function listenPopoverHidden(handler: () => void): Promise<UnlistenFn> {
+  return listen<Record<string, never>>("popover-hidden", () => handler());
+}
+
+export type PopoverCommand =
+  | { type: "select_item"; itemId: string; show: boolean }
+  | { type: "jump_to_waiting" }
+  | { type: "set_window_visible"; visible: boolean | "toggle" }
+  | { type: "new_item"; projectId?: string; kind: "agent" | "shell" | "neovim"; tool?: string }
+  | { type: "open_palette"; projectId?: string; mode?: "open" | "new" }
+  | { type: "close_item"; itemId: string; confirmed?: boolean };
+
+/** Close confirmation is an ok reply, matching control::execute (not an IPC rejection). */
+export type PopoverReply =
+  | { ok: true; itemId?: string; visible?: boolean; result?: "closed"; reason?: never }
+  | { ok: true; result: "needs-confirmation"; reason: CloseReason }
+  | { ok: false; error: string; message: string };
+
+export function popoverCommand(command: PopoverCommand): Promise<PopoverReply> {
+  return invoke<PopoverReply>("popover_command", { command });
+}
+
+export function popoverHide(): Promise<void> {
+  return invoke<void>("popover_hide");
+}
+
+/** Show/hide the main window without activating the app or taking the popover's focus. */
+export function popoverToggleMain(): Promise<void> {
+  return invoke<void>("popover_toggle_main");
+}
+
+/** Content height in CSS pixels; native clamps and preserves the anchored top edge. */
+export function popoverSetHeight(height: number): Promise<void> {
+  return invoke<void>("popover_set_height", { height });
+}
+
 /** Key-window changes of this app window (not first-responder changes inside it). */
 export function listenWindowFocus(handler: (focused: boolean) => void): Promise<UnlistenFn> {
   return getCurrentWindow().onFocusChanged((event) => handler(event.payload));

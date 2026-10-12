@@ -17,6 +17,7 @@ mod linux;
 mod logger;
 #[cfg(target_os = "macos")]
 mod macos;
+mod menubar;
 mod notify;
 mod omp_link;
 mod runtime;
@@ -69,10 +70,20 @@ pub fn ctl(args: Vec<std::ffi::OsString>) -> i32 {
 /// (`tests/gui_*.rs`), which drive them on the main thread with the real runtime. Not an API.
 #[doc(hidden)]
 pub mod testing {
+    #[cfg(target_os = "macos")]
+    pub use crate::commands::{
+        popover_command, popover_hide, popover_set_height, popover_toggle_main,
+    };
+    #[cfg(target_os = "macos")]
+    pub use crate::control::Command as PopoverCommand;
     pub use crate::lifecycle::{show_window, MAIN_WINDOW};
+    #[cfg(target_os = "macos")]
+    pub use crate::menubar::{show as popover_show, update_menu_bar_title};
     #[cfg(target_os = "macos")]
     pub use crate::platform::{application_hidden, defer_on_main};
     pub use crate::platform::{pick_directory, window_presentable};
+    #[cfg(target_os = "macos")]
+    pub use crate::tray_model::BarCounts;
 
     /// The application exactly as [`crate::run`] builds it; its setup (main window, terminal
     /// host, shortcuts, tray) runs on the event loop's first turn.
@@ -135,6 +146,10 @@ fn app() -> App {
             commands::terminal_focus,
             commands::app_hide,
             commands::app_request_quit,
+            commands::popover_command,
+            commands::popover_hide,
+            commands::popover_set_height,
+            commands::popover_toggle_main,
         ])
         .setup(|app| {
             omp_link::start();
@@ -147,6 +162,11 @@ fn app() -> App {
             lifecycle::install_shortcuts(&window)?;
             attach_terminal_host(&window)?;
             lifecycle::install_menu_bar_icon(app)?;
+            #[cfg(target_os = "macos")]
+            if let Err(error) = menubar::create(app) {
+                log::warn!("Menu-bar popover unavailable; keeping the native menu: {error}");
+                menubar::recover_menu_only(app.handle());
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -155,6 +175,22 @@ fn app() -> App {
 
 fn on_run_event(app: &AppHandle, event: RunEvent) {
     match event {
+        // Successful panel conversion is process-lifetime: ordinary close requests only
+        // dismiss it. Failed startup recovery uses destroy(), which bypasses this request.
+        #[cfg(target_os = "macos")]
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == menubar::WINDOW => {
+            api.prevent_close();
+            let app = app.clone();
+            macos::defer_on_main(Box::new(move || {
+                if let Err(error) = menubar::hide(&app) {
+                    log::warn!("popover close: {error}");
+                }
+            }));
+        }
         // No visible title bar or close button, but the OS can still ask to close (e.g.
         // Window > Close shortcuts from other tools): hide instead, keeping every session alive.
         RunEvent::WindowEvent {

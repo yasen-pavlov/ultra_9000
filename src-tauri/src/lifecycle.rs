@@ -202,27 +202,7 @@ fn model(state: &WorkspaceState) -> TrayModel {
     );
     model.dark_icon = workspace::tray_dark_icon().unwrap_or(false);
     model.icon_shown = crate::control::tray_icon_shown(workspace::tray_show().unwrap_or_default());
-    #[cfg(target_os = "macos")]
-    if let Ok(app) = workspace::app_handle() {
-        // Coloured attention images must follow the menu bar's actual appearance.
-        if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-            if let Ok(theme) = window.theme() {
-                model.dark_icon = theme == tauri::Theme::Light;
-            }
-        }
-    }
     model
-}
-#[cfg(target_os = "macos")]
-fn macos_tray_image(model: &TrayModel) -> tauri::Result<Image<'static>> {
-    let bytes: &[u8] = if !model.attention() {
-        include_bytes!("../icons/tray/macos-template-36.png")
-    } else if model.dark_icon {
-        include_bytes!("../icons/tray/macos-dark-attention-36.png")
-    } else {
-        include_bytes!("../icons/tray/macos-light-attention-36.png")
-    };
-    Image::from_bytes(bytes)
 }
 pub fn install_menu_bar_icon(app: &App) -> tauri::Result<()> {
     let state = workspace::snapshot().map_err(|e| tauri::Error::Io(std::io::Error::other(e)))?;
@@ -233,13 +213,16 @@ pub fn install_menu_bar_icon(app: &App) -> tauri::Result<()> {
     {
         let menu = tray_menu(app.handle(), &model)?;
         let tray = TrayIconBuilder::with_id("ultra9000")
-            .icon(macos_tray_image(&model)?)
-            .icon_as_template(!model.attention())
+            .icon(Image::from_bytes(include_bytes!(
+                "../icons/tray/macos-template-36.png"
+            ))?)
+            .icon_as_template(true)
             .tooltip(&model.tooltip)
             .menu(&menu)
-            .show_menu_on_left_click(true)
+            .show_menu_on_left_click(false)
             .build(app)?;
         tray.set_visible(model.icon_shown)?;
+        crate::menubar::update_menu_bar_title(&tray, model.segments)?;
         app.manage(MenuBarIcon(tray));
     }
     TRAY_MODEL.with(|cache| *cache.borrow_mut() = Some(model));
@@ -257,9 +240,12 @@ pub fn update_tray<R: Runtime>(app: &AppHandle<R>, state: &WorkspaceState) {
         let result = (|| {
             tray.0.set_menu(Some(tray_menu(app, &model)?))?;
             tray.0.set_tooltip(Some(&model.tooltip))?;
-            tray.0.set_icon(Some(macos_tray_image(&model)?))?;
-            tray.0.set_icon_as_template(!model.attention())?;
             tray.0.set_visible(model.icon_shown)?;
+            if !model.icon_shown {
+                crate::menubar::hide(app)
+                    .map_err(|error| tauri::Error::Io(std::io::Error::other(error)))?;
+            }
+            crate::menubar::update_menu_bar_title(&tray.0, model.segments)?;
             Ok::<(), tauri::Error>(())
         })();
         if let Err(error) = result {
@@ -422,6 +408,57 @@ pub fn show_window_with_activation<R: Runtime>(
     refresh_tray(app);
     Ok(())
 }
+/// h in the menu-bar panel: order the main window without activating or stealing key.
+#[cfg(target_os = "macos")]
+pub fn toggle_main_inactive<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    use objc2::{rc::Retained, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSWindow, NSWindowOcclusionState};
+    let mtm = MainThreadMarker::new().expect("inactive window toggle off main");
+    let window = app
+        .get_webview_window(MAIN_WINDOW)
+        .ok_or("main window not found")?;
+    // SAFETY: invoked through on_main_deferred, while Tauri owns the live window.
+    let native = unsafe {
+        Retained::retain(
+            window
+                .ns_window()
+                .map_err(|e| e.to_string())?
+                .cast::<NSWindow>(),
+        )
+    }
+    .ok_or("main native window not found")?;
+    let on_active_space = native.isOnActiveSpace();
+    let shown = crate::menubar::toggle_hides_main(
+        native.isVisible(),
+        native
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible),
+        on_active_space,
+    );
+    if shown {
+        workspace::invalidate_focus();
+        native.orderOut(None);
+    } else {
+        let appkit = NSApplication::sharedApplication(mtm);
+        if appkit.isHidden() {
+            appkit.unhideWithoutActivation();
+        }
+        if native.isMiniaturized() {
+            native.deminiaturize(None);
+        }
+        if !on_active_space {
+            // Re-order an already-visible off-Space window so it comes to this Space
+            // instead of leaving the user's h action with no visible effect.
+            native.orderOut(None);
+        }
+        native.orderFrontRegardless();
+    }
+    WINDOW_SHOWN.store(!shown, Ordering::Release);
+    workspace::window_changed();
+    refresh_tray(app);
+    Ok(())
+}
+
 pub fn request_quit<R: Runtime>(app: &AppHandle<R>) {
     if QUIT_PENDING.swap(true, Ordering::AcqRel) {
         return;

@@ -94,6 +94,24 @@ show = "auto" # auto (default) | always | never
 
 `never` removes the tray icon (Linux StatusNotifierItem, macOS menu-bar item) and `always` keeps it. `auto` shows it except while a desktop-shell plugin watches the app over the control link below: the icon is withdrawn when the first watcher connects and returns 5 s after the last one disconnects, so a crashed or removed plugin never leaves a hidden window without a way back. Changes apply live.
 
+On macOS, left-clicking the menu-bar item toggles a keyboard-focused popover without
+activating the app or bringing its main window forward. Right-click or Ctrl-click opens
+the existing native tray menu. Esc, click-away, changing Spaces, or hiding the menu-bar
+item dismisses the popover without ending any item. The panel is anchored below the status
+button on its own display and its content height is clamped to the available screen area.
+The static capsule shows the U_ mark (with a dot for unread turns), an orange needs-you
+pill, red errors, a purple working arc and an on-job ring. Zero segments are omitted;
+counts above 99 display `99+`, while accessibility labels retain exact totals. Colours
+follow the menu bar's own light/dark appearance, and the capsule never animates. Busy
+shells, successful agent exits, shell exits and seen turns do not add status segments;
+failed launches and unsuccessful/signalled agent exits add red errors, using the same
+classification as the control snapshot and Noctalia capsule. In the popover, h toggles
+the main window without taking focus; n/t/e create rows without closing the panel;
+selecting a row, j or o brings the main window forward. Popover focus never marks a turn
+seen: only main-window keyboard focus does. Linux keeps its existing tray behaviour.
+If native popover setup is unsupported or fails, the app keeps running and left-click opens
+the existing menu instead; the failed window and its event registrations are removed.
+
 ### Control link
 
 The running app listens on a private local socket (`control-<pid>.sock` next to the OMP status link: `$XDG_RUNTIME_DIR/ultra-9000/` on Linux, the per-user temp directory on macOS) that a shell plugin such as Noctalia's `muty/ultra9000` uses through the app's own command-line client, which never starts the app:
@@ -104,11 +122,17 @@ ultra9000 ctl select_item '{"itemId":"item-3"}'
 ultra9000 ctl jump_to_waiting
 ultra9000 ctl set_window_visible '{"visible":"toggle"}'
 ultra9000 ctl set_window_visible '{"visible":true,"activationToken":"<XDG_ACTIVATION_TOKEN>","desktopStartupId":"<DESKTOP_STARTUP_ID>"}' # activation fields optional
-ultra9000 ctl new_item '{"projectId":"/abs/project","kind":"shell"}'   # kind: agent | shell | neovim, optional tool
-ultra9000 ctl open_palette '{"projectId":"/abs/project"}'
+ultra9000 ctl new_item '{"projectId":"/abs/project","kind":"shell"}'   # kind: agent | shell | neovim; projectId and tool optional
+ultra9000 ctl new_item '{"kind":"agent"}' # omitted projectId uses the launch-default directory/tool
+ultra9000 ctl open_palette '{"projectId":"/abs/project","mode":"new"}' # projectId optional; mode open (default) | new
 ultra9000 ctl close_item '{"itemId":"item-3","confirmed":false}'
 ultra9000 ctl request_quit
 ```
+
+`new_item {projectId?, kind, tool?}` launches in a listed project's root, or in the app's
+launch-default directory when `projectId` is omitted; neither path shows the main window.
+`open_palette {projectId?, mode?}` opens the main window's palette in `open` mode by default;
+`mode: "new"` opens the project's new-item picker, as its sidebar + does.
 
 `watch` prints a `snapshot` of the sidebar (projects and items in sidebar order with their state, no icons) at once and after every change, a `ping` every 5 s, and `{"type":"disconnected"}` once whenever no app is running or the app goes away; it reconnects every 1 s, backing off to 10 s. A one-shot command prints its `reply` and exits 0 if it succeeded, 1 if not, or 2 when no app is running (printing `{"type":"disconnected"}`) or the arguments are not a JSON object. `close_item` follows the app's close rules but never opens the app's confirmation; it answers `"result":"needs-confirmation"` with a `reason` instead, and `"confirmed":true` closes. The newest running instance is used; `ULTRA9000_CONTROL_SOCKET=<path>` picks a socket explicitly. Inside the macOS bundle the binary is `Ultra 9000.app/Contents/MacOS/ultra9000`.
 

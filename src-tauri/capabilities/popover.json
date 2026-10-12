@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "popover",
+  "description": "macOS-only bundled menu-bar popover: snapshot reads, scoped control actions, content height and dismissal. No terminal, filesystem, dialog, settings-write or main-window authority.",
+  "local": true,
+  "windows": ["popover"],
+  "platforms": ["macOS"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-workspace-state",
+    "allow-settings-state",
+    "allow-popover-command",
+    "allow-popover-hide",
+    "allow-popover-set-height",
+    "allow-popover-toggle-main"
+  ]
+}

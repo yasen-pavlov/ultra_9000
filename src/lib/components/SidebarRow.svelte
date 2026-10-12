@@ -14,6 +14,7 @@
     selected,
     compact,
     rovable,
+    ring = false,
     onselect,
     onclose,
   }: {
@@ -25,6 +26,9 @@
     compact: boolean;
     /** Holds the sidebar's roving tab stop. */
     rovable: boolean;
+    /** Draw the keyboard focus ring regardless of DOM focus (the menu-bar popover's own focus
+     *  state, which a pointer action can move; `:focus-visible` would not show it then). */
+    ring?: boolean;
     onselect: () => void;
     onclose: () => void;
   } = $props();
@@ -34,6 +38,7 @@
   class="row {view.rowClass}"
   class:sel={selected}
   class:cmp={compact}
+  class:ring
   data-item-id={item.id}
   data-need={item.activity === "needs-you" ? "" : undefined}
 >
@@ -97,7 +102,8 @@
     --row-bg: var(--sel);
     background: var(--row-bg);
   }
-  .row:has(.sel-hit:focus-visible) {
+  .row:has(.sel-hit:focus-visible),
+  .row.ring {
     box-shadow: inset 0 0 0 2px var(--blue);
   }
   .sel-hit {
@@ -171,13 +177,15 @@
   }
   .row:hover .x,
   .row.sel .x,
-  .row:focus-within .x {
+  .row:focus-within .x,
+  .row.ring .x {
     opacity: 1;
     pointer-events: auto;
   }
   .row:hover .t,
   .row.sel .t,
-  .row:focus-within .t {
+  .row:focus-within .t,
+  .row.ring .t {
     padding-right: 18px;
   }
   .row.cmp .x {
@@ -185,12 +193,14 @@
   }
   .row.cmp:hover,
   .row.cmp.sel,
-  .row.cmp:focus-within {
+  .row.cmp:focus-within,
+  .row.cmp.ring {
     padding-right: 30px;
   }
   .row.cmp:hover .t,
   .row.cmp.sel .t,
-  .row.cmp:focus-within .t {
+  .row.cmp:focus-within .t,
+  .row.cmp.ring .t {
     padding-right: 0;
   }
   .row.exited .t,

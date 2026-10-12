@@ -1,3 +1,36 @@
 fn main() {
-    tauri_build::build();
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "workspace_state",
+            "item_launch",
+            "item_resume",
+            "item_restart",
+            "item_select",
+            "item_close",
+            "notice_dismiss",
+            "sheet_open",
+            "sheet_close",
+            "app_quit",
+            "last_set_resume",
+            "last_set_dismiss",
+            "ui_set",
+            "path_check",
+            "pick_directory",
+            "conversations_list",
+            "settings_state",
+            "settings_set",
+            "settings_reset",
+            "settings_open_file",
+            "settings_reveal",
+            "terminal_set_viewport",
+            "terminal_focus",
+            "app_hide",
+            "app_request_quit",
+            "popover_command",
+            "popover_hide",
+            "popover_set_height",
+            "popover_toggle_main",
+        ]),
+    ))
+    .expect("Unable to build the Tauri application manifest");
 }

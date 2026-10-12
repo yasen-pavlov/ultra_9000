@@ -4,6 +4,7 @@
   // Delete closes, Esc returns to the terminal. Order is native and never changes with state.
   import { clock } from "../clock.svelte";
   import { run } from "../errors.svelte";
+  import { edgeChipLabel, measureOffscreenNeeds, sameIds } from "../edges";
   import { projectInitials } from "../format";
   import { itemView } from "../items";
   import { itemClose, itemSelect, sheetClose, sheetOpen, uiSet, type ItemState } from "../native";
@@ -80,18 +81,9 @@
 
   function measureEdges(): void {
     if (listEl === null) return;
-    const box = listEl.getBoundingClientRect();
-    const up: string[] = [];
-    const down: string[] = [];
-    for (const element of listEl.querySelectorAll<HTMLElement>("[data-need]")) {
-      const rect = element.getBoundingClientRect();
-      const id = element.dataset.itemId;
-      if (id === undefined) continue;
-      if (rect.bottom <= box.top + 4) up.push(id);
-      else if (rect.top >= box.bottom - 4) down.push(id);
-    }
-    if (up.join("|") !== above.join("|")) above = up;
-    if (down.join("|") !== below.join("|")) below = down;
+    const { above: up, below: down } = measureOffscreenNeeds(listEl);
+    if (!sameIds(up, above)) above = up;
+    if (!sameIds(down, below)) below = down;
   }
 
   // Waiting items scrolled out of view get an edge chip.
@@ -268,16 +260,14 @@
       {#if above.length > 0}
         <div class="edgechip top">
           <button type="button" class="chip need" onclick={() => jumpTo(above[above.length - 1])}>
-            ↑ {above.length}
-            {above.length === 1 ? "needs" : "need"} you
+            {edgeChipLabel("up", above.length)}
           </button>
         </div>
       {/if}
       {#if below.length > 0}
         <div class="edgechip bottom">
           <button type="button" class="chip need" onclick={() => jumpTo(below[0])}>
-            ↓ {below.length}
-            {below.length === 1 ? "needs" : "need"} you
+            {edgeChipLabel("down", below.length)}
           </button>
         </div>
       {/if}
