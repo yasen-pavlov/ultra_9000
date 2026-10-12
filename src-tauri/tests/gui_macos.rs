@@ -862,7 +862,7 @@ mod macos {
                 "Ultra 9000, 100 need you, 101 working, 205 running",
             ),
         ];
-        let mut aqua_raster: Option<(isize, isize, Vec<u8>)> = None;
+        let mut aqua_raster: Option<StatusRaster> = None;
         for (appearance_name, name) in [
             ("aqua", unsafe { NSAppearanceNameAqua }),
             ("dark-aqua", unsafe { NSAppearanceNameDarkAqua }),
@@ -871,83 +871,22 @@ mod macos {
             report.check(appearance.is_some(), &format!("{appearance_name} exists"));
             button.setAppearance(appearance.as_deref());
             sleep(POLL).await; // KVO must run independently of workspace publishes.
-            let mut quiet_width = 0.;
-            let mut single_width = 0.;
+            let mut widths = StatusWidths::default();
             for (state, counts, label) in &cases {
                 report.check(
                     testing::update_menu_bar_title(&tray, *counts).is_ok(),
                     &format!("{appearance_name}/{state} rendered by native production entry"),
                 );
                 sleep(POLL).await;
-                let bounds = button.bounds();
-                if *state == "quiet" {
-                    quiet_width = bounds.size.width;
-                }
-                if *state == "working" {
-                    single_width = bounds.size.width;
-                }
-                if *state != "quiet" && *state != "unread" {
-                    report.check(
-                        bounds.size.width > quiet_width,
-                        &format!("{appearance_name}/{state} width grows beyond the quiet mark"),
-                    );
-                }
-                if *state == "all" {
-                    report.check(
-                        bounds.size.width > single_width,
-                        "all segments are wider than one working segment",
-                    );
-                }
-                // SAFETY: accessibilityLabel is an NSString* (nullable) getter on this live
-                // AppKit button; objc2 retains the returned value for the comparison.
-                let actual: Option<Retained<NSString>> =
-                    unsafe { msg_send![&*button, accessibilityLabel] };
-                report.check(
-                    actual.as_deref().map(NSString::to_string).as_deref() == Some(*label),
-                    &format!("{appearance_name}/{state} exact accessible label"),
+                check_status_metrics(&button, report, appearance_name, state, label, &mut widths);
+                check_status_raster(
+                    &button,
+                    report,
+                    appearance_name,
+                    state,
+                    shots.as_deref(),
+                    &mut aqua_raster,
                 );
-                match render_button_2x(&button) {
-                    Ok(bitmap) => {
-                        if *state == "all" {
-                            let bytes = bitmap_raster(&bitmap).expect("raster already validated");
-                            if appearance_name == "aqua" {
-                                aqua_raster = Some((
-                                    bitmap.pixelsWide(),
-                                    bitmap.pixelsHigh(),
-                                    bytes.to_vec(),
-                                ));
-                            } else if let Some((width, height, aqua)) = &aqua_raster {
-                                report.check(
-                                    (*width, *height) == (bitmap.pixelsWide(), bitmap.pixelsHigh()),
-                                    "appearance changes preserve raster geometry",
-                                );
-                                report.check(
-                                    aqua.as_slice() != bytes,
-                                    "Aqua and DarkAqua actually render different status pixels",
-                                );
-                            } else {
-                                report.check(
-                                    false,
-                                    "Aqua reference raster exists for the appearance comparison",
-                                );
-                            }
-                        }
-                        if let Some(directory) = &shots {
-                            report.check(
-                                write_bitmap(
-                                    &bitmap,
-                                    &directory
-                                        .join(format!("status-{state}-{appearance_name}.png")),
-                                )
-                                .is_ok(),
-                                &format!("write {state}/{appearance_name} PNG"),
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        report.check(false, &format!("draw {state}/{appearance_name}: {error}"))
-                    }
-                }
             }
         }
         button.setAppearance(None);
@@ -955,6 +894,116 @@ mod macos {
         report.check(
             NSApplication::sharedApplication(mtm).isActive(),
             "main-window show leaves the app active after popover scenario",
+        );
+    }
+
+    #[derive(Default)]
+    struct StatusWidths {
+        quiet: f64,
+        working: f64,
+    }
+
+    struct StatusRaster {
+        width: isize,
+        height: isize,
+        pixels: Vec<u8>,
+    }
+
+    fn check_status_metrics(
+        button: &NSStatusBarButton,
+        report: &Report,
+        appearance: &str,
+        state: &str,
+        label: &str,
+        widths: &mut StatusWidths,
+    ) {
+        let width = button.bounds().size.width;
+        if state == "quiet" {
+            widths.quiet = width;
+        }
+        if state == "working" {
+            widths.working = width;
+        }
+        if state != "quiet" && state != "unread" {
+            report.check(
+                width > widths.quiet,
+                &format!("{appearance}/{state} width grows beyond the quiet mark"),
+            );
+        }
+        if state == "all" {
+            report.check(
+                width > widths.working,
+                "all segments are wider than one working segment",
+            );
+        }
+        // SAFETY: accessibilityLabel is an NSString* (nullable) getter on this live
+        // AppKit button; objc2 retains the returned value for the comparison.
+        let actual: Option<Retained<NSString>> = unsafe { msg_send![button, accessibilityLabel] };
+        report.check(
+            actual.as_deref().map(NSString::to_string).as_deref() == Some(label),
+            &format!("{appearance}/{state} exact accessible label"),
+        );
+    }
+
+    fn check_status_raster(
+        button: &NSStatusBarButton,
+        report: &Report,
+        appearance: &str,
+        state: &str,
+        shots: Option<&Path>,
+        aqua_raster: &mut Option<StatusRaster>,
+    ) {
+        let bitmap = match render_button_2x(button) {
+            Ok(bitmap) => bitmap,
+            Err(error) => {
+                report.check(false, &format!("draw {state}/{appearance}: {error}"));
+                return;
+            }
+        };
+        if state == "all" {
+            compare_status_appearance(&bitmap, report, appearance, aqua_raster);
+        }
+        if let Some(directory) = shots {
+            report.check(
+                write_bitmap(
+                    &bitmap,
+                    &directory.join(format!("status-{state}-{appearance}.png")),
+                )
+                .is_ok(),
+                &format!("write {state}/{appearance} PNG"),
+            );
+        }
+    }
+
+    fn compare_status_appearance(
+        bitmap: &NSBitmapImageRep,
+        report: &Report,
+        appearance: &str,
+        aqua_raster: &mut Option<StatusRaster>,
+    ) {
+        let bytes = bitmap_raster(bitmap).expect("raster already validated");
+        if appearance == "aqua" {
+            *aqua_raster = Some(StatusRaster {
+                width: bitmap.pixelsWide(),
+                height: bitmap.pixelsHigh(),
+                pixels: bytes.to_vec(),
+            });
+            return;
+        }
+        let Some(aqua) = aqua_raster else {
+            report.check(
+                false,
+                "Aqua reference raster exists for the appearance comparison",
+            );
+            return;
+        };
+        report.check(
+            (aqua.width, aqua.height) == (bitmap.pixelsWide(), bitmap.pixelsHigh()),
+            "appearance changes preserve raster geometry",
+        );
+        report.check(
+            aqua.pixels.as_slice() != bytes,
+            "Aqua and DarkAqua actually render different status pixels",
         );
     }
 

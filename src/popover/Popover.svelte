@@ -23,6 +23,7 @@
   import { settings } from "../lib/settings.svelte";
   import { workspace } from "../lib/workspace.svelte";
   import { PopoverController, rowStop } from "./controller.svelte";
+  import { EMPTY_HINTS, fittingHints, LIST_HINTS, QUESTION_HINTS, type Hint } from "./hints";
   import { popoverKey } from "./keys";
   import RowConfirm from "./RowConfirm.svelte";
 
@@ -31,6 +32,11 @@
   let listEl = $state<HTMLElement | null>(null);
   let innerEl = $state<HTMLElement | null>(null);
   let footEl = $state<HTMLElement | null>(null);
+  let sumEl = $state<HTMLElement | null>(null);
+  /** How many leading footer hints fit the band; the rest are dropped, never clipped. */
+  let hintsShown = $state(Number.POSITIVE_INFINITY);
+  /** The header line is too long at 320 px: show its short form. */
+  let summaryShort = $state(false);
   let above = $state<string[]>([]);
   let below = $state<string[]>([]);
   let listenError = $state<string | null>(null);
@@ -45,13 +51,18 @@
   const rows = $derived(groups.flatMap((group) => group.items));
   const liveProjects = $derived(groups.filter((group) => group.items.length > 0).length);
   const pinned = $derived(groups.filter((group) => group.project.pinned).length);
-  const summary = $derived(
-    rows.length > 0
-      ? `${rows.length} live · ${liveProjects} ${liveProjects === 1 ? "project" : "projects"}`
-      : pinned > 0
-        ? `nothing running · ${pinned} pinned`
-        : "nothing running",
-  );
+  /** Header line (board 05) and, when it doesn't fit, its short form: every empty project's own
+   *  line already says "Nothing running", so the pinned count is what stays. */
+  const summaries = $derived.by((): { full: string; short: string } => {
+    if (rows.length > 0) {
+      const live = `${rows.length} live · ${liveProjects} ${liveProjects === 1 ? "project" : "projects"}`;
+      return { full: live, short: live };
+    }
+    if (pinned > 0) return { full: `nothing running · ${pinned} pinned`, short: `${pinned} pinned` };
+    return { full: "nothing running", short: "nothing running" };
+  });
+  const summary = $derived(summaries.full);
+  const shownSummary = $derived(summaryShort ? summaries.short : summaries.full);
   const needsYou = $derived(workspace.needsYouCount);
   const waiting = $derived(workspace.waiting.length);
 
@@ -77,6 +88,12 @@
             ? "empty"
             : "hints",
   );
+  const hints = $derived.by((): readonly Hint[] => {
+    if (footer === "question") return QUESTION_HINTS;
+    if (footer === "empty") return EMPTY_HINTS;
+    if (footer === "hints") return LIST_HINTS;
+    return [];
+  });
 
   $effect(() => workspace.connect());
   $effect(() => settings.connect());
@@ -121,6 +138,8 @@
     controller.opened();
     above = [];
     below = [];
+    // A window laid out while hidden may have measured before its fonts were ready.
+    fitHints();
     void tick().then(() => {
       if (document.activeElement instanceof HTMLElement && document.activeElement !== rootEl)
         document.activeElement.blur();
@@ -173,6 +192,33 @@
     return () => observer.disconnect();
   });
 
+  /** Measures every hint at its natural width, then keeps the leading ones that fit the band. */
+  function fitHints(): void {
+    hintsShown = Number.POSITIVE_INFINITY;
+    void tick().then(() => {
+      if (footEl === null) return;
+      const style = getComputedStyle(footEl);
+      const available = footEl.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const widths = [...footEl.querySelectorAll<HTMLElement>("[data-hint]")].map(
+        (hint) => hint.getBoundingClientRect().width,
+      );
+      hintsShown = fittingHints(widths, parseFloat(style.columnGap) || 0, available);
+    });
+  }
+
+  $effect(() => {
+    void hints;
+    untrack(fitHints);
+  });
+
+  $effect(() => {
+    void summary;
+    summaryShort = false;
+    void tick().then(() => {
+      if (sumEl !== null && sumEl.scrollWidth > sumEl.clientWidth) summaryShort = true;
+    });
+  });
+
   // Rows change state in place; needs-you rows may enter or leave the hidden part.
   $effect(() => {
     void rows;
@@ -219,7 +265,9 @@
     >
     <div class="hd">
       <span class="ttl">Ultra 9000</span>
-      <span class="sum">{snapshot === null ? "" : summary}</span>
+      <span class="sum" bind:this={sumEl} title={summaryShort ? summary : undefined}
+        >{snapshot === null ? "" : shownSummary}</span
+      >
     </div>
     <div class="acts">
       <button
@@ -337,8 +385,6 @@
   <footer class="pfoot" bind:this={footEl}>
     {#if footer === "error"}
       <span class="err" role="alert" title={controller.error}>{controller.error}</span>
-    {:else if footer === "question"}
-      <span><kbd>w</kbd>end</span><span><kbd>↑</kbd><kbd>↓</kbd>keep</span><span><kbd>esc</kbd>keep running</span>
     {:else if footer === "edge"}
       {#if above.length > 0}
         <button type="button" class="chip need" onclick={() => controller.reveal(above[above.length - 1])}
@@ -350,14 +396,13 @@
           >{edgeChipLabel("down", below.length)}</button
         >
       {/if}
-    {:else if footer === "empty"}
-      <span><kbd>n</kbd>agent</span><span><kbd>t</kbd>terminal</span><span><kbd>e</kbd>Neovim</span><span
-        ><kbd>o</kbd>palette</span
-      ><span><kbd>esc</kbd>close</span>
     {:else}
-      <span><kbd>↵</kbd>show</span><span><kbd>j</kbd>jump</span><span><kbd>n</kbd>new</span><span
-        ><kbd>w</kbd>close</span
-      ><span><kbd>1</kbd>–<kbd>9</kbd>row</span>
+      {#each hints as hint, index (hint.label)}
+        <span data-hint hidden={index >= hintsShown}
+          >{#each hint.keys as key, at (at)}{#if at > 0 && hint.joiner !== undefined}{hint.joiner}{/if}<kbd>{key}</kbd
+            >{/each}{hint.label}</span
+        >
+      {/each}
     {/if}
     {#if listenError !== null && footer !== "error"}<span class="visually-hidden" role="alert">{listenError}</span>{/if}
   </footer>

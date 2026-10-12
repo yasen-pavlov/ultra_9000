@@ -496,124 +496,158 @@ pub type Done = Map<String, Value>;
 /// Run `command` as the app's own UI would: main-thread parts through
 /// [`on_main_deferred`], launches through [`launch_item`].
 pub async fn execute<R: Runtime>(app: AppHandle<R>, command: Command) -> Result<Done, Failure> {
-    let unknown_item =
-        |id: &str| Failure::new("unknown_item", format!("Item {id} does not exist."));
     match command {
-        Command::SelectItem { item_id, show } => {
-            on_main(move || {
-                if !workspace::has_item(&item_id)? {
-                    return Err(unknown_item(&item_id));
-                }
-                if show {
-                    lifecycle::show_window(&app)?;
-                }
-                workspace::select(&item_id)?;
-                Ok(Done::new())
-            })
-            .await
-        }
-        Command::JumpToWaiting {} => {
-            on_main(move || {
-                let nothing = || Failure::new("nothing_waiting", "Nothing is waiting for you.");
-                if workspace::waiting_next()?.is_none() {
-                    return Err(nothing());
-                }
-                lifecycle::show_window(&app)?;
-                let id = workspace::jump_waiting()?.ok_or_else(nothing)?;
-                Ok(done([("itemId", json!(id))]))
-            })
-            .await
-        }
+        Command::SelectItem { item_id, show } => execute_select_item(app, item_id, show).await,
+        Command::JumpToWaiting {} => execute_jump_to_waiting(app).await,
         Command::SetWindowVisible {
             visible,
             activation_token,
             desktop_startup_id,
-        } => {
-            on_main(move || {
-                if workspace::is_quitting()? {
-                    return Err(Failure::new("quitting", "Ultra 9000 is quitting."));
-                }
-                let visible = match visible {
-                    Visibility::Set(visible) => visible,
-                    Visibility::Toggle(Toggle::Toggle) => !lifecycle::window_visible(),
-                };
-                if visible {
-                    lifecycle::show_window_with_activation(
-                        &app,
-                        activation_token.as_deref(),
-                        desktop_startup_id.as_deref(),
-                    )?;
-                } else {
-                    lifecycle::hide_window(&app)?;
-                }
-                Ok(done([("visible", json!(visible))]))
-            })
-            .await
-        }
+        } => execute_set_window_visible(app, visible, activation_token, desktop_startup_id).await,
         Command::NewItem {
             project_id,
             kind,
             tool,
-        } => {
-            let (cwd, default) = on_main(move || {
-                if let Some(project) = project_id {
-                    let default =
-                        workspace::listed_project_default_tool(&project)?.ok_or_else(|| {
-                            Failure::new(
-                                "unknown_project",
-                                format!("Project {project} is not in the sidebar."),
-                            )
-                        })?;
-                    Ok((project, default))
-                } else {
-                    Ok(workspace::default_launch()?)
-                }
-            })
-            .await?;
-            let tool = match kind {
-                NewKind::Agent => tool.unwrap_or(default),
-                NewKind::Shell => "shell".into(),
-                NewKind::Neovim => "neovim".into(),
-            };
-            match launch_item(tool, cwd, None, None).await {
-                Ok(id) => Ok(done([("itemId", json!(id))])),
-                Err(message) => Err(Failure::new("launch_failed", message)),
-            }
-        }
+        } => execute_new_item(project_id, kind, tool).await,
         Command::OpenPalette { project_id, mode } => {
-            on_main(move || {
-                lifecycle::show_window(&app)?;
-                workspace::sheet_open(OpenableSheet::Palette {
-                    project_id,
-                    mode: mode.unwrap_or(PaletteMode::Open),
-                })?;
-                Ok(Done::new())
-            })
-            .await
+            execute_open_palette(app, project_id, mode).await
         }
-        Command::CloseItem { item_id, confirmed } => {
-            on_main(move || {
-                if !workspace::has_item(&item_id)? {
-                    return Err(unknown_item(&item_id));
-                }
-                Ok(match workspace::close_reporting(&item_id, confirmed)? {
-                    CloseOutcome::Closed => done([("result", json!("closed"))]),
-                    CloseOutcome::NeedsConfirmation(reason) => done([
-                        ("result", json!("needs-confirmation")),
-                        ("reason", json!(reason)),
-                    ]),
-                })
-            })
-            .await
-        }
-        Command::RequestQuit {} => {
-            on_main(move || {
-                lifecycle::request_quit(&app);
-                Ok(Done::new())
-            })
-            .await
-        }
+        Command::CloseItem { item_id, confirmed } => execute_close_item(item_id, confirmed).await,
+        Command::RequestQuit {} => execute_request_quit(app).await,
     }
+}
+
+fn unknown_item(id: &str) -> Failure {
+    Failure::new("unknown_item", format!("Item {id} does not exist."))
+}
+
+async fn execute_select_item<R: Runtime>(
+    app: AppHandle<R>,
+    item_id: String,
+    show: bool,
+) -> Result<Done, Failure> {
+    on_main(move || {
+        if !workspace::has_item(&item_id)? {
+            return Err(unknown_item(&item_id));
+        }
+        if show {
+            lifecycle::show_window(&app)?;
+        }
+        workspace::select(&item_id)?;
+        Ok(Done::new())
+    })
+    .await
+}
+
+async fn execute_jump_to_waiting<R: Runtime>(app: AppHandle<R>) -> Result<Done, Failure> {
+    on_main(move || {
+        let nothing = || Failure::new("nothing_waiting", "Nothing is waiting for you.");
+        if workspace::waiting_next()?.is_none() {
+            return Err(nothing());
+        }
+        lifecycle::show_window(&app)?;
+        let id = workspace::jump_waiting()?.ok_or_else(nothing)?;
+        Ok(done([("itemId", json!(id))]))
+    })
+    .await
+}
+
+async fn execute_set_window_visible<R: Runtime>(
+    app: AppHandle<R>,
+    visible: Visibility,
+    activation_token: Option<String>,
+    desktop_startup_id: Option<String>,
+) -> Result<Done, Failure> {
+    on_main(move || {
+        if workspace::is_quitting()? {
+            return Err(Failure::new("quitting", "Ultra 9000 is quitting."));
+        }
+        let visible = match visible {
+            Visibility::Set(visible) => visible,
+            Visibility::Toggle(Toggle::Toggle) => !lifecycle::window_visible(),
+        };
+        if visible {
+            lifecycle::show_window_with_activation(
+                &app,
+                activation_token.as_deref(),
+                desktop_startup_id.as_deref(),
+            )?;
+        } else {
+            lifecycle::hide_window(&app)?;
+        }
+        Ok(done([("visible", json!(visible))]))
+    })
+    .await
+}
+
+async fn execute_new_item(
+    project_id: Option<String>,
+    kind: NewKind,
+    tool: Option<String>,
+) -> Result<Done, Failure> {
+    let (cwd, default) = on_main(move || {
+        if let Some(project) = project_id {
+            let default = workspace::listed_project_default_tool(&project)?.ok_or_else(|| {
+                Failure::new(
+                    "unknown_project",
+                    format!("Project {project} is not in the sidebar."),
+                )
+            })?;
+            Ok((project, default))
+        } else {
+            Ok(workspace::default_launch()?)
+        }
+    })
+    .await?;
+    let tool = match kind {
+        NewKind::Agent => tool.unwrap_or(default),
+        NewKind::Shell => "shell".into(),
+        NewKind::Neovim => "neovim".into(),
+    };
+    match launch_item(tool, cwd, None, None).await {
+        Ok(id) => Ok(done([("itemId", json!(id))])),
+        Err(message) => Err(Failure::new("launch_failed", message)),
+    }
+}
+
+async fn execute_open_palette<R: Runtime>(
+    app: AppHandle<R>,
+    project_id: Option<String>,
+    mode: Option<PaletteMode>,
+) -> Result<Done, Failure> {
+    on_main(move || {
+        lifecycle::show_window(&app)?;
+        workspace::sheet_open(OpenableSheet::Palette {
+            project_id,
+            mode: mode.unwrap_or(PaletteMode::Open),
+        })?;
+        Ok(Done::new())
+    })
+    .await
+}
+
+async fn execute_close_item(item_id: String, confirmed: bool) -> Result<Done, Failure> {
+    on_main(move || {
+        if !workspace::has_item(&item_id)? {
+            return Err(unknown_item(&item_id));
+        }
+        Ok(match workspace::close_reporting(&item_id, confirmed)? {
+            CloseOutcome::Closed => done([("result", json!("closed"))]),
+            CloseOutcome::NeedsConfirmation(reason) => done([
+                ("result", json!("needs-confirmation")),
+                ("reason", json!(reason)),
+            ]),
+        })
+    })
+    .await
+}
+
+async fn execute_request_quit<R: Runtime>(app: AppHandle<R>) -> Result<Done, Failure> {
+    on_main(move || {
+        lifecycle::request_quit(&app);
+        Ok(Done::new())
+    })
+    .await
 }
 
 /// Run `task` on the main thread.

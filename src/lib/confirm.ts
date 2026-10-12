@@ -39,6 +39,18 @@ export interface CloseQuestionInput {
 const plain = (text: string): CopyPart => ({ text, strong: false });
 const strong = (text: string): CopyPart => ({ text, strong: true });
 
+/** What a waiting agent asks for; an agent without an attention kind waits for a reply. */
+const WAITING_FOR: Record<NonNullable<ItemState["attention"]>, string> = {
+  question: "answer to a question",
+  approval: "approval",
+};
+
+/** The End button; every other reason ends an agent. */
+const END_LABEL: Partial<Record<CloseReason, string>> = {
+  "foreground-job": "End shell",
+  neovim: "End Neovim",
+};
+
 export function closeQuestion({
   item,
   reason,
@@ -67,8 +79,8 @@ export function closeQuestion({
       ];
       break;
     case "agent-needs-you": {
-      const waitingFor =
-        item?.attention === "question" ? "answer to a question" : item?.attention === "approval" ? "approval" : "reply";
+      const attention = item?.attention ?? null;
+      const waitingFor = attention === null ? "reply" : WAITING_FOR[attention];
       body = [
         {
           parts: [
@@ -127,7 +139,7 @@ export function closeQuestion({
   }
   return {
     title: `End “${item?.title ?? "this item"}”?`,
-    endLabel: reason === "foreground-job" ? "End shell" : reason === "neovim" ? "End Neovim" : "End agent",
+    endLabel: END_LABEL[reason] ?? "End agent",
     body,
   };
 }

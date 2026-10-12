@@ -328,93 +328,7 @@ fn install_status_click_monitor(app: &AppHandle) -> tauri::Result<EventMonitors>
     monitors.0.push(global);
     let app = app.clone();
     let block: RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent> =
-        RcBlock::new(move |event: NonNull<NSEvent>| {
-            // SAFETY: AppKit supplies a live event for this synchronous main-thread callback;
-            // the reference is not retained past the callback and mutations are deferred.
-            let event_ref = unsafe { event.as_ref() };
-            let mtm = main_thread();
-            let event_window = event_ref.window(mtm);
-            let status_window = STATUS_WINDOW.with(|window| window.borrow().clone());
-            let target = if status_window.as_ref().is_some_and(|status| {
-                event_window
-                    .as_ref()
-                    .is_some_and(|window| Retained::as_ptr(window) == Retained::as_ptr(status))
-            }) {
-                ClickTarget::Status
-            } else if event_window
-                .as_ref()
-                .is_some_and(|window| is_popover_window(window))
-            {
-                ClickTarget::Panel
-            } else {
-                ClickTarget::Other
-            };
-            let (button, phase) = match event_ref.r#type() {
-                NSEventType::LeftMouseDown => (MouseButton::Left, MousePhase::Down),
-                NSEventType::LeftMouseUp => (MouseButton::Left, MousePhase::Up),
-                NSEventType::RightMouseDown => (MouseButton::Right, MousePhase::Down),
-                _ => (MouseButton::Other, MousePhase::Down),
-            };
-            let open = panel_open();
-            let modifiers = event_ref.modifierFlags();
-            let route = click_route(
-                target,
-                button,
-                phase,
-                modifiers.contains(NSEventModifierFlags::Control),
-                modifiers.contains(NSEventModifierFlags::Command),
-                open,
-            );
-            match route {
-                ClickRoute::Pass => {}
-                ClickRoute::ContextDown | ClickRoute::ContextUp => {
-                    if open {
-                        let app = app.clone();
-                        defer_on_main(Box::new(move || {
-                            if let Err(error) = hide(&app) {
-                                log::warn!("popover control-click: {error}");
-                            }
-                        }));
-                    }
-                    if let Some(view) = status_window
-                        .and_then(|window| window.contentView())
-                        .and_then(|view| view.hitTest(event_ref.locationInWindow()))
-                    {
-                        // SAFETY: hitTest returns a live responder in the retained status
-                        // window on main. NSResponder's rightMouseDown:/rightMouseUp: both
-                        // take NSEvent* and return void; direct dispatch preserves tray-icon's
-                        // existing menu tracking and does not retain this event pointer.
-                        unsafe {
-                            let _: () = if route == ClickRoute::ContextDown {
-                                msg_send![&*view, rightMouseDown: event_ref]
-                            } else {
-                                msg_send![&*view, rightMouseUp: event_ref]
-                            };
-                        }
-                        return std::ptr::null_mut();
-                    }
-                }
-                ClickRoute::Dismiss | ClickRoute::Hide | ClickRoute::Show => {
-                    let app = app.clone();
-                    defer_on_main(Box::new(move || {
-                        let result = if route == ClickRoute::Show {
-                            show(&app)
-                        } else {
-                            hide(&app)
-                        };
-                        if let Err(error) = result {
-                            log::warn!("popover click: {error}");
-                        }
-                    }));
-                }
-                ClickRoute::RestoreHighlight => {
-                    // tray-icon clears highlight in its mouse-up handler; restore it after
-                    // that callback, only if this panel remains open.
-                    defer_on_main(Box::new(|| super::render::highlight(panel_open())));
-                }
-            }
-            event.as_ptr()
-        });
+        RcBlock::new(move |event| handle_status_mouse_event(&app, event));
     // SAFETY: AppKit retains this block until removal. Returned event pointers are either
     // the same live input pointer or null (consumed); captures stay owned by this monitor.
     let local = unsafe {
@@ -433,6 +347,125 @@ fn install_status_click_monitor(app: &AppHandle) -> tauri::Result<EventMonitors>
     })?;
     monitors.0.push(local);
     Ok(monitors)
+}
+
+fn status_click_target(
+    event_window: &Option<Retained<NSWindow>>,
+    status_window: &Option<Retained<NSWindow>>,
+) -> ClickTarget {
+    if status_window.as_ref().is_some_and(|status| {
+        event_window
+            .as_ref()
+            .is_some_and(|window| Retained::as_ptr(window) == Retained::as_ptr(status))
+    }) {
+        ClickTarget::Status
+    } else if event_window
+        .as_ref()
+        .is_some_and(|window| is_popover_window(window))
+    {
+        ClickTarget::Panel
+    } else {
+        ClickTarget::Other
+    }
+}
+
+fn handle_status_mouse_event(app: &AppHandle, event: NonNull<NSEvent>) -> *mut NSEvent {
+    // SAFETY: AppKit supplies a live event for this synchronous main-thread callback;
+    // the reference is not retained past the callback and mutations are deferred.
+    let event_ref = unsafe { event.as_ref() };
+    let event_window = event_ref.window(main_thread());
+    let status_window = STATUS_WINDOW.with(|window| window.borrow().clone());
+    let target = status_click_target(&event_window, &status_window);
+    let (button, phase) = match event_ref.r#type() {
+        NSEventType::LeftMouseDown => (MouseButton::Left, MousePhase::Down),
+        NSEventType::LeftMouseUp => (MouseButton::Left, MousePhase::Up),
+        NSEventType::RightMouseDown => (MouseButton::Right, MousePhase::Down),
+        _ => (MouseButton::Other, MousePhase::Down),
+    };
+    let open = panel_open();
+    let modifiers = event_ref.modifierFlags();
+    let route = click_route(
+        target,
+        button,
+        phase,
+        modifiers.contains(NSEventModifierFlags::Control),
+        modifiers.contains(NSEventModifierFlags::Command),
+        open,
+    );
+    if dispatch_status_click(app, event_ref, status_window, route, open) {
+        std::ptr::null_mut()
+    } else {
+        event.as_ptr()
+    }
+}
+
+/// Return whether the original mouse event was consumed by the native menu forwarding.
+fn dispatch_status_click(
+    app: &AppHandle,
+    event: &NSEvent,
+    status_window: Option<Retained<NSWindow>>,
+    route: ClickRoute,
+    open: bool,
+) -> bool {
+    match route {
+        ClickRoute::Pass => {}
+        ClickRoute::ContextDown | ClickRoute::ContextUp => {
+            return forward_control_click(app, event, status_window, route, open);
+        }
+        ClickRoute::Dismiss | ClickRoute::Hide | ClickRoute::Show => {
+            let app = app.clone();
+            defer_on_main(Box::new(move || {
+                let result = if route == ClickRoute::Show {
+                    show(&app)
+                } else {
+                    hide(&app)
+                };
+                if let Err(error) = result {
+                    log::warn!("popover click: {error}");
+                }
+            }));
+        }
+        ClickRoute::RestoreHighlight => {
+            // tray-icon clears highlight in its mouse-up handler; restore it after
+            // that callback, only if this panel remains open.
+            defer_on_main(Box::new(|| super::render::highlight(panel_open())));
+        }
+    }
+    false
+}
+
+fn forward_control_click(
+    app: &AppHandle,
+    event: &NSEvent,
+    status_window: Option<Retained<NSWindow>>,
+    route: ClickRoute,
+    open: bool,
+) -> bool {
+    if open {
+        let app = app.clone();
+        defer_on_main(Box::new(move || {
+            if let Err(error) = hide(&app) {
+                log::warn!("popover control-click: {error}");
+            }
+        }));
+    }
+    let Some(view) = status_window
+        .and_then(|window| window.contentView())
+        .and_then(|view| view.hitTest(event.locationInWindow()))
+    else {
+        return false;
+    };
+    // SAFETY: hitTest returns a live responder in the retained status window on main.
+    // NSResponder's rightMouseDown:/rightMouseUp: take NSEvent* and return void. Direct
+    // dispatch preserves tray-icon's menu tracking and does not retain this event pointer.
+    unsafe {
+        let _: () = if route == ClickRoute::ContextDown {
+            msg_send![&*view, rightMouseDown: event]
+        } else {
+            msg_send![&*view, rightMouseUp: event]
+        };
+    }
+    true
 }
 
 fn rect(frame: NSRect) -> Rect {
