@@ -38,7 +38,7 @@ On **macOS**, Ultra 9000 holds an IOKit `PreventUserIdleSystemSleep` assertion. 
 
 On **Linux**, Ultra 9000 holds a logind `idle` inhibitor labelled **Ultra 9000 keep awake**, honoured by idle daemons such as hypridle. **This also stops idle screen locking while held**; it does not prohibit manual locking or explicit suspend. Inspect it with `systemd-inhibit --list`. The macOS assertion uses the same neutral label, so switching enabled modes never leaves stale reason text in OS tools.
 
-The Linux inhibitor descriptors are close-on-exec: launched shells and tools do not inherit the hold, so they cannot keep idle sleep blocked after Ultra 9000 releases it.
+The Linux inhibitor descriptors are marked close-on-exec as soon as they are received by the inhibitor worker, so launched shells and tools do not inherit an established hold. A small cross-thread window remains between D-Bus receiving a descriptor and the worker marking it during acquisition.
 
 Hiding the app does not release an inhibitor while the selected condition still holds. It is released when the condition stops, the setting becomes `off`, or the app exits. Switching enabled modes retains an existing hold. Failed acquisitions retry on later workspace changes after a 30-second backoff, logging only the first consecutive failure; the app keeps running. Turning the setting off and back on permits an immediate new attempt.
 

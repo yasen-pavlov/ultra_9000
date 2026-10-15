@@ -4,6 +4,7 @@ use std::{
     fs::File,
     io::Read,
     os::fd::{FromRawFd, OwnedFd as StdOwnedFd},
+    os::unix::fs::MetadataExt,
     process::{Child, Command},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -219,14 +220,51 @@ fn a_child_started_while_held_cannot_extend_the_inhibitor_after_off() {
             .update(reason, Instant::now(), |_| inhibit(&mut bus, &mut connect))
             .is_none());
     });
-    // The returned inhibitor is already held: the server's request-record channel
-    // alone is not a readiness barrier for SCM_RIGHTS receipt and CLOEXEC setup.
+    // This verifies the acquired end state, not the transient recvmsg -> fcntl
+    // window: OwnedFd deserialization already duplicates with CLOEXEC. The pipe
+    // scan additionally catches any non-CLOEXEC copies retained by future zbus versions.
     assert!(held.value.is_some());
     let mut peer = calls
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
         .peer
         .unwrap();
+    let fd = held.value.as_ref().unwrap().as_raw_fd();
+    // SAFETY: the held descriptor remains owned and open throughout this check.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+    let identity = peer.metadata().unwrap();
+    let mut matching = 0;
+    for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+        let entry = entry.unwrap();
+        let Ok(metadata) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.dev() != identity.dev() || metadata.ino() != identity.ino() {
+            continue;
+        }
+        let fd: libc::c_int = entry.file_name().to_str().unwrap().parse().unwrap();
+        // SAFETY: F_GETFD only reads flags. A concurrently closed transient copy
+        // may return EBADF; the peer and held handle remain open.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EBADF)
+            );
+            continue;
+        }
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "inhibitor pipe fd {fd} is inheritable"
+        );
+        matching += 1;
+    }
+    assert!(
+        matching >= 2,
+        "the peer and held inhibitor must both be checked"
+    );
     let mut child = Sleeper(Command::new("sleep").arg("30").spawn().unwrap());
     assert!(child.0.try_wait().unwrap().is_none());
     request(None, &enabled, |reason| {

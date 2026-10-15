@@ -135,6 +135,7 @@ mod dbus {
         hints: HashMap<String, OwnedValue>,
         timeout: i32,
         id: u32,
+        sender: String,
     }
     struct Notifications {
         recorded: mpsc::Sender<Announcement>,
@@ -155,6 +156,7 @@ mod dbus {
             actions: Vec<String>,
             hints: HashMap<String, OwnedValue>,
             expire_timeout: i32,
+            #[zbus(header)] header: zbus::message::Header<'_>,
         ) -> zbus::fdo::Result<u32> {
             let id = if replaces_id == 0 {
                 self.next.fetch_add(1, Ordering::Relaxed)
@@ -173,6 +175,7 @@ mod dbus {
                     hints,
                     timeout: expire_timeout,
                     id,
+                    sender: header.sender().unwrap().as_str().to_owned(),
                 })
                 .unwrap();
             if rejected {
@@ -421,7 +424,15 @@ mod dbus {
         assert_eq!(restarted.replaces, 0);
         assert_eq!(restarted.id, 1);
         // A late signal from the previous owner cannot open the new owner's reused id.
-        action(&server, restarted.id, "default");
+        server
+            .emit_signal(
+                Some(first.sender.as_str()),
+                PATH,
+                DESTINATION,
+                "ActionInvoked",
+                &(restarted.id, "default"),
+            )
+            .unwrap();
         // The monitor observes a later signal from this same old-owner connection.
         // Only then send the new token: observing it on the client listener proves
         // every earlier old-owner message has already passed through that listener.

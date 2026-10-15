@@ -15,18 +15,24 @@ impl PrivateBus {
     pub(crate) fn start() -> Option<Self> {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("busconfig.xml");
+        let listen = format!("unix:dir={}", directory.path().display())
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
         std::fs::write(
             &config,
-            r#"<busconfig>
+            format!(
+                r#"<busconfig>
 <type>session</type>
-<listen>unix:tmpdir=/tmp</listen>
+<listen>{listen}</listen>
 <auth>EXTERNAL</auth>
 <policy context="default">
   <allow send_destination="*"/>
   <allow receive_sender="*"/>
   <allow own="*"/>
 </policy>
-</busconfig>"#,
+</busconfig>"#
+            ),
         )
         .unwrap();
         // No service directories: even an unowned destination can never activate
