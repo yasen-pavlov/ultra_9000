@@ -110,8 +110,8 @@ impl Bus {
     fn tracker(&self) -> MutexGuard<'_, Tracker<Sequence>> {
         self.tracker.lock().unwrap_or_else(PoisonError::into_inner)
     }
-    fn connect() -> zbus::Result<Self> {
-        let connection = Builder::session()?.method_timeout(METHOD_TIMEOUT).build()?;
+    fn connect(builder: Builder<'_>, on_click: ClickHandler) -> zbus::Result<Self> {
+        let connection = builder.method_timeout(METHOD_TIMEOUT).build()?;
         let proxy = DBusProxy::new(&connection)?;
         proxy.add_match_rule(
             MatchRule::builder()
@@ -195,7 +195,7 @@ impl Bus {
                     });
                     drop(tracker);
                     if let Some((identifier, token)) = clicked {
-                        super::clicked(&identifier, token);
+                        on_click(&identifier, token);
                     }
                 }
                 let mut tracker = listener.lock().unwrap_or_else(PoisonError::into_inner);
@@ -252,7 +252,9 @@ struct Notification {
     summary: String,
     body: String,
 }
-static WORKER: LazyLock<Option<mpsc::Sender<Notification>>> = LazyLock::new(|| {
+type ClickHandler = Arc<dyn Fn(&str, Option<String>) + Send + Sync>;
+
+fn worker(address: Option<String>, clicked: ClickHandler) -> Option<mpsc::Sender<Notification>> {
     let (sender, requests) = mpsc::channel();
     std::thread::Builder::new()
         .name("u9k-notify".into())
@@ -264,7 +266,11 @@ static WORKER: LazyLock<Option<mpsc::Sender<Notification>>> = LazyLock::new(|| {
                 }
                 let result = (|| {
                     if bus.is_none() {
-                        bus = Some(Bus::connect()?);
+                        let builder = match &address {
+                            Some(address) => Builder::address(address.as_str())?,
+                            None => Builder::session()?,
+                        };
+                        bus = Some(Bus::connect(builder, clicked.clone())?);
                     }
                     bus.as_ref().expect("connected above").notify(notification)
                 })();
@@ -276,16 +282,28 @@ static WORKER: LazyLock<Option<mpsc::Sender<Notification>>> = LazyLock::new(|| {
         .inspect_err(|error| log::warn!("notification worker failed: {error}"))
         .ok()
         .map(|_| sender)
+}
+static WORKER: LazyLock<Option<mpsc::Sender<Notification>>> = LazyLock::new(|| {
+    worker(
+        None,
+        Arc::new(|identifier, token| {
+            super::clicked(crate::workspace::app_handle, identifier, token);
+        }),
+    )
 });
 pub(super) fn send(item: &str, summary: &str, body: &str) {
     if let Some(worker) = &*WORKER {
-        if let Err(error) = worker.send(Notification {
-            identifier: super::identifier(item),
-            summary: summary.to_owned(),
-            body: body.to_owned(),
-        }) {
-            log::warn!("notification worker unavailable: {error}");
-        }
+        enqueue(worker, item, summary, body);
+    }
+}
+
+fn enqueue(worker: &mpsc::Sender<Notification>, item: &str, summary: &str, body: &str) {
+    if let Err(error) = worker.send(Notification {
+        identifier: super::identifier(item),
+        summary: summary.to_owned(),
+        body: body.to_owned(),
+    }) {
+        log::warn!("notification worker unavailable: {error}");
     }
 }
 

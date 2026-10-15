@@ -5,39 +5,55 @@ use std::{
 use zbus::{blocking::Connection, zvariant::OwnedFd};
 
 /// Requests for the inhibitor worker: system-bus calls never run on the main thread.
-static WORKER: LazyLock<Option<mpsc::Sender<Option<&'static str>>>> = LazyLock::new(|| {
+static WORKER: LazyLock<Option<mpsc::Sender<Option<&str>>>> =
+    LazyLock::new(|| worker(Connection::system));
+
+fn worker(
+    connect: impl FnMut() -> zbus::Result<Connection> + Send + 'static,
+) -> Option<mpsc::Sender<Option<&'static str>>> {
     let (sender, requests) = mpsc::channel();
     std::thread::Builder::new()
         .name("u9k-keep-awake".into())
-        .spawn(move || run(&requests))
+        .spawn(move || run(&requests, connect))
         .inspect_err(|e| log::warn!("keep awake unavailable: {e}"))
         .ok()
         .map(|_| sender)
-});
+}
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Main thread. Enabled publications allow retries after an acquisition failed.
 pub fn hold(reason: Option<&'static str>) {
-    if !ENABLED.replace(reason.is_some()) && reason.is_none() {
-        return;
-    }
-    if let Some(worker) = &*WORKER {
-        let _ = worker.send(reason);
-    }
+    ENABLED.with(|enabled| {
+        request(reason, enabled, |reason| {
+            if let Some(worker) = &*WORKER {
+                let _ = worker.send(reason);
+            }
+        })
+    });
 }
 
-fn run(requests: &mpsc::Receiver<Option<&'static str>>) {
+fn request(
+    reason: Option<&'static str>,
+    enabled: &Cell<bool>,
+    send: impl FnOnce(Option<&'static str>),
+) {
+    if !enabled.replace(reason.is_some()) && reason.is_none() {
+        return;
+    }
+    send(reason);
+}
+
+fn run(
+    requests: &mpsc::Receiver<Option<&'static str>>,
+    mut connect: impl FnMut() -> zbus::Result<Connection>,
+) {
     let mut bus = None;
     let mut held = super::Hold::default();
-    while let Ok(mut reason) = requests.recv() {
-        // Only the latest request matters.
-        while let Ok(next) = requests.try_recv() {
-            reason = next;
-        }
+    while let Ok(reason) = requests.recv() {
         if let Some(error) = held.update(reason, std::time::Instant::now(), |_| {
-            let result = inhibit(&mut bus);
+            let result = inhibit(&mut bus, &mut connect);
             if result.is_err() {
                 bus = None;
             }
@@ -49,10 +65,13 @@ fn run(requests: &mpsc::Receiver<Option<&'static str>>) {
 }
 
 /// logind holds the inhibitor until the returned descriptor closes (or the app exits).
-fn inhibit(bus: &mut Option<Connection>) -> zbus::Result<OwnedFd> {
+fn inhibit(
+    bus: &mut Option<Connection>,
+    connect: &mut impl FnMut() -> zbus::Result<Connection>,
+) -> zbus::Result<OwnedFd> {
     let bus = match bus {
         Some(bus) => bus,
-        None => bus.insert(Connection::system()?),
+        None => bus.insert(connect()?),
     };
     let reply = bus.call_method(
         Some("org.freedesktop.login1"),
@@ -63,3 +82,6 @@ fn inhibit(bus: &mut Option<Connection>) -> zbus::Result<OwnedFd> {
     )?;
     reply.body().deserialize()
 }
+
+#[cfg(test)]
+mod tests;

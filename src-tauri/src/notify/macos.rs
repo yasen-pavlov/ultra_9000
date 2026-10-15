@@ -33,8 +33,8 @@ define_class!(
         #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
         fn will_present(
             &self,
-            _center: &UNUserNotificationCenter,
-            _notification: &UNNotification,
+            _center: Option<&UNUserNotificationCenter>,
+            _notification: Option<&UNNotification>,
             handler: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
             handler
@@ -49,18 +49,38 @@ define_class!(
             response: &UNNotificationResponse,
             handler: &block2::DynBlock<dyn Fn()>,
         ) {
-            // SAFETY: a framework constant, immutable for the process lifetime.
-            if response
-                .actionIdentifier()
-                .isEqualToString(unsafe { UNNotificationDefaultActionIdentifier })
-            {
-                let identifier = response.notification().request().identifier().to_string();
-                super::clicked(&identifier, None);
-            }
-            handler.call(());
+            self.respond(
+                &response.actionIdentifier(),
+                &response.notification().request(),
+                handler,
+            );
         }
     }
 );
+
+impl Delegate {
+    fn respond(
+        &self,
+        action: &NSString,
+        request: &UNNotificationRequest,
+        handler: &block2::DynBlock<dyn Fn()>,
+    ) {
+        // SAFETY: a framework constant, immutable for the process lifetime.
+        if action.isEqualToString(unsafe { UNNotificationDefaultActionIdentifier }) {
+            super::clicked(
+                crate::workspace::app_handle,
+                &request.identifier().to_string(),
+                None,
+            );
+        }
+        handler.call(());
+    }
+}
+
+fn delegate() -> Retained<Delegate> {
+    // SAFETY: a plain NSObject subclass without ivars; `init` is NSObject's.
+    unsafe { msg_send![Delegate::alloc(), init] }
+}
 
 /// The delegate, retained for the process lifetime (the center holds it weakly). `None`
 /// without the app bundle: notifications are disabled then.
@@ -77,8 +97,7 @@ static INSTALLED: LazyLock<Installed> = LazyLock::new(|| {
         log::warn!("desktop notifications need the app bundle; disabled for this run");
         return Installed(None);
     }
-    // SAFETY: a plain NSObject subclass without ivars; `init` is NSObject's.
-    let delegate: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(), init] };
+    let delegate = delegate();
     UNUserNotificationCenter::currentNotificationCenter()
         .setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     Installed(Some(delegate))
@@ -98,38 +117,51 @@ pub(super) fn send(item: &str, summary: &str, body: &str) {
     let center = UNUserNotificationCenter::currentNotificationCenter();
     // Prompts only the first time; afterwards it reports the user's choice at once.
     let posted = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
-        if granted.as_bool() {
-            post(&identifier, &summary, &body);
-        } else {
-            static DENIED: AtomicBool = AtomicBool::new(false);
-            if !DENIED.swap(true, Ordering::Relaxed) {
-                log::warn!("notifications are turned off for Ultra 9000 in System Settings");
-            }
-        }
+        authorized(granted, || post(&identifier, &summary, &body));
     });
     center
         .requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &posted);
 }
 
+fn authorized(granted: Bool, announce: impl FnOnce()) {
+    if granted.as_bool() {
+        announce();
+    } else {
+        static DENIED: AtomicBool = AtomicBool::new(false);
+        if !DENIED.swap(true, Ordering::Relaxed) {
+            log::warn!("notifications are turned off for Ultra 9000 in System Settings");
+        }
+    }
+}
+
 /// The request identifier is the item's, so a newer notification replaces the older one.
 fn post(identifier: &str, summary: &str, body: &str) {
-    let content = UNMutableNotificationContent::new();
-    content.setTitle(&NSString::from_str(summary));
-    content.setBody(&NSString::from_str(body));
-    let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-        &NSString::from_str(identifier),
-        &content,
-        None,
-    );
-    let added = RcBlock::new(|error: *mut NSError| {
-        // SAFETY: the framework passes nil or a valid NSError for the call's duration.
-        if let Some(error) = unsafe { error.as_ref() } {
-            log::warn!(
-                "desktop notification failed: {}",
-                error.localizedDescription()
-            );
-        }
-    });
+    let request = request(identifier, summary, body);
+    let added = RcBlock::new(report_error);
     UNUserNotificationCenter::currentNotificationCenter()
         .addNotificationRequest_withCompletionHandler(&request, Some(&added));
 }
+
+fn request(identifier: &str, summary: &str, body: &str) -> Retained<UNNotificationRequest> {
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(summary));
+    content.setBody(&NSString::from_str(body));
+    UNNotificationRequest::requestWithIdentifier_content_trigger(
+        &NSString::from_str(identifier),
+        &content,
+        None,
+    )
+}
+
+fn report_error(error: *mut NSError) {
+    // SAFETY: the framework passes nil or a valid NSError for the call's duration.
+    if let Some(error) = unsafe { error.as_ref() } {
+        log::warn!(
+            "desktop notification failed: {}",
+            error.localizedDescription()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests;

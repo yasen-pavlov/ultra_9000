@@ -56,11 +56,15 @@ fn item_of(identifier: &str) -> Option<&str> {
 
 /// A notification was clicked (any thread): show the window and select its item.
 /// `activation_token` is the Wayland activation token the notification server sent, if any.
-fn clicked(identifier: &str, activation_token: Option<String>) {
+fn clicked<R: Runtime>(
+    app: impl FnOnce() -> Result<AppHandle<R>, String> + Send + 'static,
+    identifier: &str,
+    activation_token: Option<String>,
+) {
     let item = item_of(identifier).map(str::to_owned);
     crate::platform::defer_on_main(Box::new(move || {
-        let result = workspace::app_handle()
-            .and_then(|app| open_item(&app, item.as_deref(), activation_token.as_deref()));
+        let result =
+            app().and_then(|app| open_item(&app, item.as_deref(), activation_token.as_deref()));
         if let Err(e) = result {
             log::warn!("notification click: {e}");
         }

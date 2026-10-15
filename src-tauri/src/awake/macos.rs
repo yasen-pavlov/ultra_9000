@@ -37,3 +37,6 @@ fn create(_reason: &'static str) -> Result<Assertion, i32> {
         Err(result)
     }
 }
+
+#[cfg(test)]
+mod tests;
