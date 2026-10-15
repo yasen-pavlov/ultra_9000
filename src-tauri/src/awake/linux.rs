@@ -1,5 +1,6 @@
 use std::{
     cell::Cell,
+    os::fd::AsRawFd,
     sync::{mpsc, LazyLock},
 };
 use zbus::{blocking::Connection, zvariant::OwnedFd};
@@ -80,7 +81,28 @@ fn inhibit(
         "Inhibit",
         &("idle", "Ultra 9000", "Ultra 9000 keep awake", "block"),
     )?;
-    reply.body().deserialize()
+    // zbus may retain message copies of the SCM_RIGHTS descriptors. Mark those
+    // originals too, not just the owned handle deserialized below.
+    for fd in reply.data().fds() {
+        close_on_exec(fd.as_raw_fd())?;
+    }
+    let fd: OwnedFd = reply.body().deserialize()?;
+    close_on_exec(fd.as_raw_fd())?;
+    Ok(fd)
+}
+
+fn close_on_exec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    // SAFETY: the caller owns a live fd; these commands only read/update its fd flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if flags & libc::FD_CLOEXEC == 0
+        && unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

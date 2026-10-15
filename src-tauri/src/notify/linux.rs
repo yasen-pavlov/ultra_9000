@@ -254,7 +254,10 @@ struct Notification {
 }
 type ClickHandler = Arc<dyn Fn(&str, Option<String>) + Send + Sync>;
 
-fn worker(address: Option<String>, clicked: ClickHandler) -> Option<mpsc::Sender<Notification>> {
+fn worker(
+    connect: impl Fn() -> zbus::Result<Builder<'static>> + Send + 'static,
+    clicked: ClickHandler,
+) -> Option<mpsc::Sender<Notification>> {
     let (sender, requests) = mpsc::channel();
     std::thread::Builder::new()
         .name("u9k-notify".into())
@@ -266,11 +269,7 @@ fn worker(address: Option<String>, clicked: ClickHandler) -> Option<mpsc::Sender
                 }
                 let result = (|| {
                     if bus.is_none() {
-                        let builder = match &address {
-                            Some(address) => Builder::address(address.as_str())?,
-                            None => Builder::session()?,
-                        };
-                        bus = Some(Bus::connect(builder, clicked.clone())?);
+                        bus = Some(Bus::connect(connect()?, clicked.clone())?);
                     }
                     bus.as_ref().expect("connected above").notify(notification)
                 })();
@@ -285,7 +284,7 @@ fn worker(address: Option<String>, clicked: ClickHandler) -> Option<mpsc::Sender
 }
 static WORKER: LazyLock<Option<mpsc::Sender<Notification>>> = LazyLock::new(|| {
     worker(
-        None,
+        Builder::session,
         Arc::new(|identifier, token| {
             super::clicked(crate::workspace::app_handle, identifier, token);
         }),

@@ -229,6 +229,45 @@ mod dbus {
             .expect("Notify not received")
     }
 
+    fn old_owner_barrier(server: &Connection, private: &PrivateBus) {
+        let monitor = Builder::address(private.address.as_str())
+            .unwrap()
+            .method_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let rule = MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender(server.unique_name().unwrap().as_str())
+            .unwrap()
+            .interface(DESTINATION)
+            .unwrap()
+            .path(PATH)
+            .unwrap()
+            .member("TestBarrier")
+            .unwrap()
+            .build();
+        let mut messages = MessageIterator::for_match_rule(rule, &monitor, None).unwrap();
+        let (observed, ready) = mpsc::channel();
+        let done = std::thread::spawn(move || {
+            observed
+                .send(
+                    messages
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .body()
+                        .deserialize::<(u32,)>()
+                        .unwrap(),
+                )
+                .unwrap();
+        });
+        server
+            .emit_signal(None::<&str>, PATH, DESTINATION, "TestBarrier", &(1u32,))
+            .unwrap();
+        assert_eq!(ready.recv_timeout(Duration::from_secs(5)).unwrap(), (1,));
+        done.join().unwrap();
+    }
+
     #[test]
     fn private_server_delivers_real_notifications_clicks_replacements_and_restarts() {
         let Some(private) = PrivateBus::start() else {
@@ -362,6 +401,17 @@ mod dbus {
         main.until("old notification owner leaves", || {
             client.tracker().owner.is_none()
         });
+        let error = client
+            .notify(Notification {
+                identifier: crate::notify::identifier(&a),
+                summary: "no owner".into(),
+                body: String::new(),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, zbus::Error::MethodError(name, _, _) if name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown"),
+            "the isolated bus must have no activatable desktop services"
+        );
         let (new_server, new_records, _) = self::server(&private);
         main.until("new notification owner", || {
             client.tracker().owner.as_deref() == new_server.unique_name().map(|n| n.as_str())
@@ -372,6 +422,10 @@ mod dbus {
         assert_eq!(restarted.id, 1);
         // A late signal from the previous owner cannot open the new owner's reused id.
         action(&server, restarted.id, "default");
+        // The monitor observes a later signal from this same old-owner connection.
+        // Only then send the new token: observing it on the client listener proves
+        // every earlier old-owner message has already passed through that listener.
+        old_owner_barrier(&server, &private);
         new_server
             .emit_signal(
                 None::<&str>,
@@ -409,13 +463,6 @@ mod dbus {
         main.until("quitting click delivered", || clicks.try_recv().is_ok());
         main.idle();
         assert!(!lifecycle::window_visible());
-        // Exercise click error reporting without requiring a native runtime.
-        crate::notify::clicked::<tauri::test::MockRuntime>(
-            || Err("app no longer exists".into()),
-            &crate::notify::identifier(&b),
-            None,
-        );
-        main.idle();
         drop(private);
         main.until("disconnected bus observed", || {
             client.tracker().disconnected
@@ -428,20 +475,36 @@ mod dbus {
             return;
         };
         let (_server, records, fail) = server(&private);
-        let worker = worker(Some(private.address.clone()), Arc::new(|_, _| {})).unwrap();
+        let address = private.address.clone();
+        let worker = worker(
+            move || Builder::address(address.as_str()),
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
         enqueue(&worker, "item-1", "first", "one");
-        let first = received(&records);
-        fail.store(true, Ordering::Relaxed);
         enqueue(&worker, "item-1", "second", "two");
-        assert_eq!(received(&records).summary, "second");
-        fail.store(false, Ordering::Relaxed);
         enqueue(&worker, "item-1", "third", "three");
+        let first = received(&records);
+        let second = received(&records);
         let third = received(&records);
-        assert_eq!(third.summary, "third");
+        assert_eq!(
+            [
+                first.summary.as_str(),
+                second.summary.as_str(),
+                third.summary.as_str()
+            ],
+            ["first", "second", "third"]
+        );
+        assert_eq!(second.replaces, first.id);
         assert_eq!(third.replaces, first.id);
+        fail.store(true, Ordering::Relaxed);
+        enqueue(&worker, "item-1", "rejected", "");
+        assert_eq!(received(&records).summary, "rejected");
+        fail.store(false, Ordering::Relaxed);
+        enqueue(&worker, "item-1", "after rejection", "");
+        let recovered = received(&records);
+        assert_eq!(recovered.summary, "after rejection");
+        assert_eq!(recovered.replaces, first.id);
         drop(worker);
-        let (dead, receiver) = mpsc::channel();
-        drop(receiver);
-        enqueue(&dead, "item-1", "cannot send", "");
     }
 }

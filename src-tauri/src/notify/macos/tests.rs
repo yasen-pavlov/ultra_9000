@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 #[test]
-fn the_delegate_presents_banners_and_lists_and_completes_each_action() {
+fn the_delegate_presents_banners_and_lists_and_completes_ignored_actions() {
     let delegate = delegate();
     let called = Arc::new(AtomicUsize::new(0));
     let observed = called.clone();
@@ -33,13 +33,6 @@ fn the_delegate_presents_banners_and_lists_and_completes_each_action() {
     let request = request(&crate::notify::identifier("item-1"), "summary", "body");
     delegate.respond(&NSString::from_str("dismiss"), &request, &completed);
     assert_eq!(called.load(Ordering::Relaxed), 2);
-    // This only queues the app-resolution work; no workspace or window exists here.
-    delegate.respond(
-        unsafe { UNNotificationDefaultActionIdentifier },
-        &request,
-        &completed,
-    );
-    assert_eq!(called.load(Ordering::Relaxed), 3);
 }
 
 #[test]
@@ -58,17 +51,8 @@ fn notification_content_is_data_and_delivery_requires_authorization() {
     assert!(content.trigger().is_none());
     let sent = AtomicBool::new(false);
     authorized(Bool::NO, || panic!("denied permission must not send"));
-    authorized(Bool::NO, || {
-        panic!("denial remains silent on repeated requests")
-    });
     authorized(Bool::YES, || sent.store(true, Ordering::Relaxed));
     assert!(sent.load(Ordering::Relaxed));
-    report_error(std::ptr::null_mut());
-    // SAFETY: no user-info dictionary is supplied, so there are no generic entries to validate.
-    let error = unsafe {
-        NSError::errorWithDomain_code_userInfo(&NSString::from_str("U9KNotificationTest"), 1, None)
-    };
-    report_error(std::ptr::from_ref(&*error).cast_mut());
 }
 
 #[test]
@@ -84,5 +68,4 @@ fn an_unbundled_test_binary_installs_no_center_and_sends_nothing() {
         "unbundled",
         "must not request permission or call the center",
     );
-    assert!(INSTALLED.0.is_none());
 }

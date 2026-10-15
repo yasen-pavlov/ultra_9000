@@ -4,8 +4,9 @@ use std::{
     fs::File,
     io::Read,
     os::fd::{FromRawFd, OwnedFd as StdOwnedFd},
+    process::{Child, Command},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -19,6 +20,7 @@ struct Call {
 struct Manager {
     calls: mpsc::Sender<Call>,
     fail: Arc<AtomicBool>,
+    count: Arc<AtomicUsize>,
 }
 fn pipe() -> (File, StdOwnedFd) {
     let mut fds = [-1; 2];
@@ -33,6 +35,7 @@ fn pipe() -> (File, StdOwnedFd) {
 #[zbus::interface(name = "org.freedesktop.login1.Manager")]
 impl Manager {
     fn inhibit(&self, what: &str, who: &str, why: &str, mode: &str) -> zbus::fdo::Result<OwnedFd> {
+        self.count.fetch_add(1, Ordering::SeqCst);
         let arguments = (what.into(), who.into(), why.into(), mode.into());
         if self.fail.load(Ordering::Relaxed) {
             self.calls
@@ -55,9 +58,17 @@ impl Manager {
         Ok(fd.into())
     }
 }
-fn server(bus: &PrivateBus) -> (Connection, mpsc::Receiver<Call>, Arc<AtomicBool>) {
+fn server(
+    bus: &PrivateBus,
+) -> (
+    Connection,
+    mpsc::Receiver<Call>,
+    Arc<AtomicBool>,
+    Arc<AtomicUsize>,
+) {
     let (calls, received) = mpsc::channel();
     let fail = Arc::new(AtomicBool::new(false));
+    let count = Arc::new(AtomicUsize::new(0));
     let connection = Builder::address(bus.address.as_str())
         .unwrap()
         .name("org.freedesktop.login1")
@@ -67,12 +78,13 @@ fn server(bus: &PrivateBus) -> (Connection, mpsc::Receiver<Call>, Arc<AtomicBool
             Manager {
                 calls,
                 fail: fail.clone(),
+                count: count.clone(),
             },
         )
         .unwrap()
         .build()
         .unwrap();
-    (connection, received, fail)
+    (connection, received, fail, count)
 }
 fn released(peer: &mut File) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -90,12 +102,20 @@ fn released(peer: &mut File) {
     }
 }
 
+struct Sleeper(Child);
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 fn private_logind_holds_the_returned_fd_across_modes_and_releases_it_on_off() {
     let Some(private) = PrivateBus::start() else {
         return;
     };
-    let (_server, calls, _) = server(&private);
+    let (_server, calls, _, count) = server(&private);
     let address = private.address.clone();
     let worker = worker(move || Builder::address(address.as_str())?.build()).unwrap();
     let enabled = Cell::new(false);
@@ -123,12 +143,12 @@ fn private_logind_holds_the_returned_fd_across_modes_and_releases_it_on_off() {
     request(Some("running"), &enabled, |reason| {
         worker.send(reason).unwrap()
     });
-    assert!(
-        calls.recv_timeout(Duration::from_millis(100)).is_err(),
-        "a mode change must retain the original fd"
-    );
+    // The release is a FIFO barrier: every preceding request has completed once EOF
+    // arrives, so an exact count proves the mode change did not acquire again.
     request(None, &enabled, |reason| worker.send(reason).unwrap());
     released(&mut peer);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert!(calls.try_recv().is_err());
     request(None, &enabled, |_| {
         panic!("a second off request is redundant")
     });
@@ -143,7 +163,8 @@ fn private_logind_holds_the_returned_fd_across_modes_and_releases_it_on_off() {
         .unwrap();
     drop(worker);
     released(&mut peer);
-    hold(None);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert!(calls.try_recv().is_err());
 }
 
 #[test]
@@ -151,10 +172,12 @@ fn a_failed_logind_call_backs_off_until_off_then_on_retries() {
     let Some(private) = PrivateBus::start() else {
         return;
     };
-    let (_server, calls, fail) = server(&private);
+    let (_server, calls, fail, count) = server(&private);
     fail.store(true, Ordering::Relaxed);
     let address = private.address.clone();
-    let worker = worker(move || Builder::address(address.as_str())?.build()).unwrap();
+    let (worker, requests) = mpsc::channel();
+    let done =
+        std::thread::spawn(move || run(&requests, || Builder::address(address.as_str())?.build()));
     worker.send(Some("working")).unwrap();
     assert!(calls
         .recv_timeout(Duration::from_secs(5))
@@ -162,18 +185,62 @@ fn a_failed_logind_call_backs_off_until_off_then_on_retries() {
         .peer
         .is_none());
     worker.send(Some("running")).unwrap();
-    assert!(
-        calls.recv_timeout(Duration::from_millis(100)).is_err(),
-        "failed requests must back off, even across mode changes"
-    );
+    // Queue the potentially suppressed request before the off/on edge. Joining the
+    // FIFO worker below makes the negative assertion independent of scheduling.
     fail.store(false, Ordering::Relaxed);
     worker.send(None).unwrap();
     worker.send(Some("running")).unwrap();
+    worker.send(None).unwrap();
+    drop(worker);
+    done.join().unwrap();
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        2,
+        "only the initial failure and off/on retry may call logind"
+    );
+    let remaining: Vec<_> = calls.try_iter().collect();
+    assert_eq!(remaining.len(), 1);
+    let mut peer = remaining.into_iter().next().unwrap().peer.unwrap();
+    released(&mut peer);
+}
+
+#[test]
+fn a_child_started_while_held_cannot_extend_the_inhibitor_after_off() {
+    let Some(private) = PrivateBus::start() else {
+        return;
+    };
+    let (_server, calls, _, count) = server(&private);
+    let mut bus = None;
+    let mut connect = || Builder::address(private.address.as_str())?.build();
+    let enabled = Cell::new(false);
+    let mut held = crate::awake::Hold::default();
+    request(Some("working"), &enabled, |reason| {
+        assert!(held
+            .update(reason, Instant::now(), |_| inhibit(&mut bus, &mut connect))
+            .is_none());
+    });
+    // The returned inhibitor is already held: the server's request-record channel
+    // alone is not a readiness barrier for SCM_RIGHTS receipt and CLOEXEC setup.
+    assert!(held.value.is_some());
     let mut peer = calls
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
         .peer
         .unwrap();
-    worker.send(None).unwrap();
+    let mut child = Sleeper(Command::new("sleep").arg("30").spawn().unwrap());
+    assert!(child.0.try_wait().unwrap().is_none());
+    request(None, &enabled, |reason| {
+        assert!(held
+            .update(reason, Instant::now(), |_| -> zbus::Result<OwnedFd> {
+                panic!("off must release, not acquire")
+            })
+            .is_none());
+    });
+    assert!(held.value.is_none());
     released(&mut peer);
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "release must not wait for the child to exit"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
