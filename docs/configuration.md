@@ -19,7 +19,7 @@ turn_finished = false
 
 Notifications are sent as **Ultra 9000**, with its app identity, when an agent needs you or finishes a turn while its item is not presented in the focused main window. Clicking a notification shows the window and selects that item; if the item has closed, it just shows the window. A newer notification for an item replaces its older one. On Wayland, focus activation uses the notification server's token when available and remains subject to compositor policy.
 
-macOS asks for notification permission once; change the choice in System Settings → Notifications → Ultra 9000. Development/unbundled macOS runs send no notifications: the native notification API requires the `.app` bundle.
+macOS asks for notification permission once; change the choice in System Settings → Notifications → Ultra 9000. Notifications need a signed `.app` bundle: release builds are; a development run sends none, and a locally built bundle needs at least an ad-hoc signature (`codesign --force --deep -s - "Ultra 9000.app"`).
 
 ## Keep awake
 
