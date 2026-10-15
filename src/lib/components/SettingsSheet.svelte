@@ -412,6 +412,28 @@
         {/snippet}
       </SettingRow>
 
+      <div class="sec">Power</div>
+      <SettingRow
+        key="power.keep_awake"
+        name="Keep the computer awake"
+        description="Blocks idle sleep while an OMP agent works or anything runs. macOS may sleep the display; Linux also blocks the idle lock. A closed lid still sleeps."
+        timing="live"
+      >
+        {#snippet control(entry, write, pending)}
+          <span class="seg">
+            {#each [["off", "Off"], ["working", "While working"], ["running", "While running"]] as [value, label] (value)}
+              <button
+                type="button"
+                class:on={(entry?.value ?? "off") === value}
+                disabled={pending}
+                aria-pressed={(entry?.value ?? "off") === value}
+                onclick={() => write(value)}>{label}</button
+              >
+            {/each}
+          </span>
+        {/snippet}
+      </SettingRow>
+
       <div class="sec">Terminals</div>
       <SettingRow
         key="terminal.font.size"

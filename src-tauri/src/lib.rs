@@ -4,6 +4,7 @@
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!("Ultra 9000 supports macOS and Linux (Wayland) only");
 
+mod awake;
 mod commands;
 mod config;
 mod control;
@@ -152,6 +153,8 @@ fn app() -> App {
             commands::popover_toggle_main,
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            notify::install();
             omp_link::start();
             workspace::init(app.handle().clone());
             control::start(app.handle().clone());

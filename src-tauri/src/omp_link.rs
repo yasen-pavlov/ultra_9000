@@ -121,7 +121,24 @@ pub fn parse(line: &[u8]) -> Option<Message> {
         jobs.sort_by_key(|job| job.started_at);
         jobs.truncate(MAX_JOBS);
     }
+    if let Message::Name { name: Some(name) } = &mut message {
+        *name = clean_session_name(std::mem::take(name));
+    }
     Some(message)
+}
+
+/// OMP titles can begin with a Nerd Font badge. Native text surfaces use their own
+/// indicators; remove only that leading private-use prefix, never meaningful inner text.
+pub fn clean_session_name(mut name: String) -> String {
+    let private = |c: char| matches!(c, '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{ffffd}' | '\u{100000}'..='\u{10fffd}');
+    if name.starts_with(private) {
+        let rest = name.trim_start_matches(|c: char| private(c) || c.is_whitespace());
+        if !rest.is_empty() {
+            let prefix = name.len() - rest.len();
+            name.drain(..prefix);
+        }
+    }
+    name
 }
 
 /// The token of a valid version-1 hello.

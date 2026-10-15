@@ -60,6 +60,38 @@ fn working() -> Message {
 }
 
 #[test]
+fn session_names_remove_only_leading_private_use_badges() {
+    for glyph in [
+        '\u{e000}',
+        '\u{f8ff}',
+        '\u{f009e}',
+        '\u{ffffd}',
+        '\u{100000}',
+        '\u{10fffd}',
+    ] {
+        let original = format!("{glyph}\t \u{e001}  NOTIF: Keep awake");
+        assert_eq!(clean_session_name(original), "NOTIF: Keep awake");
+        let inner = format!("NOTIF: {glyph} Keep awake");
+        assert_eq!(clean_session_name(inner.clone()), inner);
+        let only = format!("{glyph}  ");
+        assert_eq!(clean_session_name(only.clone()), only);
+    }
+    assert_eq!(clean_session_name("Plain name".into()), "Plain name");
+    assert_eq!(clean_session_name(String::new()), "");
+}
+
+#[test]
+fn status_link_names_are_cleaned_before_delivery() {
+    let line = serde_json::json!({"type": "name", "name": "\u{f009e} NOTIF: Keep awake"});
+    assert_eq!(
+        parse(line.to_string().as_bytes()),
+        Some(Message::Name {
+            name: Some("NOTIF: Keep awake".into())
+        })
+    );
+}
+
+#[test]
 fn start_prepares_a_private_runtime_dir_extension_and_socket() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("ultra-9000");

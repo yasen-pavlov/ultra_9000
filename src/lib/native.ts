@@ -242,6 +242,7 @@ export type SettingsKey =
   | "tray.icon"
   | "notify.needs_you"
   | "notify.turn_finished"
+  | "power.keep_awake"
   | "terminals.remove_on_clean_exit"
   | "terminals.confirm_close_with_foreground_job"
   | "confirm.close_unmonitored_agents"

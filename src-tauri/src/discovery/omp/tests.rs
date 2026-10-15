@@ -14,6 +14,23 @@ fn slot(title: &str) -> String {
     s
 }
 #[test]
+fn saved_titles_clean_badges_in_slots_and_legacy_headers() {
+    let header = "{\"type\":\"session\",\"id\":\"id\",\"cwd\":\"/synthetic/cwd\",\"title\":\"\\uE000 NOTIF: Legacy\"}\n";
+    for (data, expected) in [
+        (header.to_owned(), "NOTIF: Legacy"),
+        (
+            format!("{}{header}", slot("\u{f009e} NOTIF: Current")),
+            "NOTIF: Current",
+        ),
+    ] {
+        let c = parse("omp", Path::new("/fixture"), data.as_bytes(), b"", 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.title, expected);
+    }
+}
+
+#[test]
 fn live_binding_keeps_new_stub() {
     let stub = b"{\"type\":\"session\",\"id\":\"stub\",\"cwd\":\"/synthetic/cwd\"}\n";
     assert!(

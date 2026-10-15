@@ -319,7 +319,8 @@ trait Host {
     fn focus_sidebar(&self);
     fn window_presentable(&self) -> bool;
     fn window_focused(&self) -> bool;
-    fn notify(&self, summary: &str, body: &str);
+    fn notify(&self, item: &str, summary: &str, body: &str);
+    fn keep_awake(&self, reason: Option<&'static str>);
     /// Probe pinned roots off the main thread, then [`apply_pinned_missing`] on it.
     fn probe_pinned(&self, pinned: Vec<PathBuf>);
 }
@@ -431,8 +432,11 @@ impl Host for Native {
             .get_webview_window(crate::lifecycle::MAIN_WINDOW)
             .is_some_and(|win| win.is_focused().unwrap_or(false))
     }
-    fn notify(&self, summary: &str, body: &str) {
-        crate::notify::desktop(summary, body);
+    fn notify(&self, item: &str, summary: &str, body: &str) {
+        crate::notify::desktop(item, summary, body);
+    }
+    fn keep_awake(&self, reason: Option<&'static str>) {
+        crate::awake::hold(reason);
     }
     fn probe_pinned(&self, pinned: Vec<PathBuf>) {
         std::thread::spawn(move || {
@@ -522,7 +526,9 @@ fn with<T>(f: impl FnOnce(&mut Workspace) -> Result<T, String>) -> Result<T, Str
         let emit = if w.changed {
             w.changed = false;
             w.revision += 1;
-            Some((w.host.clone(), w.snapshot()))
+            let state = w.snapshot();
+            let reason = crate::awake::reason(w.settings.keep_awake, &state.items);
+            Some((w.host.clone(), state, reason))
         } else {
             None
         };
@@ -530,7 +536,8 @@ fn with<T>(f: impl FnOnce(&mut Workspace) -> Result<T, String>) -> Result<T, Str
             .then(|| (w.host.clone(), w.discovery_revision));
         Ok::<_, String>((result, emit, conversations))
     })?;
-    if let Some((host, state)) = emit {
+    if let Some((host, state, reason)) = emit {
+        host.keep_awake(reason);
         host.publish(state);
     }
     if let Some((host, revision)) = conversations {
@@ -675,7 +682,6 @@ pub fn tray_dark_icon() -> Result<bool, String> {
 pub fn tray_show() -> Result<TrayShow, String> {
     with(|w| Ok(w.settings.tray_show))
 }
-#[cfg(target_os = "macos")]
 pub fn app_handle() -> Result<AppHandle, String> {
     native().map(|native| native.app.clone())
 }
@@ -1964,7 +1970,8 @@ impl Workspace {
                 record.state.unread = true;
             }
             if let Some(body) = activity_notice(activity, &self.settings) {
-                self.host.notify(&record.state.title, body);
+                self.host
+                    .notify(&record.state.id, &record.state.title, body);
             }
         }
         self.changed |= changed || before != record.observed();

@@ -67,6 +67,16 @@ pub enum TrayShow {
     Always,
     Never,
 }
+/// `[power] keep_awake`: when the app keeps the computer from idle sleep. `working` counts
+/// agents that report working or on job (OMP); `running` counts any live item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeepAwake {
+    #[default]
+    Off,
+    Working,
+    Running,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub default_tool: String,
@@ -81,6 +91,7 @@ pub struct Settings {
     pub context_bar: String,
     pub notify_needs_you: bool,
     pub notify_turn_finished: bool,
+    pub keep_awake: KeepAwake,
     pub remove_on_clean_exit: bool,
     pub confirm_close_with_foreground_job: bool,
     pub confirm_close_unmonitored_agents: bool,
@@ -106,6 +117,7 @@ impl Default for Settings {
             context_bar: "auto".into(),
             notify_needs_you: true,
             notify_turn_finished: false,
+            keep_awake: KeepAwake::Off,
             remove_on_clean_exit: true,
             confirm_close_with_foreground_job: true,
             confirm_close_unmonitored_agents: false,
@@ -258,6 +270,7 @@ pub const UI_KEYS: &[&str] = &[
     "layout.context_bar",
     "notify.needs_you",
     "notify.turn_finished",
+    "power.keep_awake",
     "terminals.remove_on_clean_exit",
     "terminals.confirm_close_with_foreground_job",
     "confirm.close_unmonitored_agents",
@@ -311,6 +324,7 @@ pub(crate) fn defaults() -> BTreeMap<Vec<String>, toml::Value> {
         ("layout.context_bar", "auto".into()),
         ("notify.needs_you", true.into()),
         ("notify.turn_finished", false.into()),
+        ("power.keep_awake", "off".into()),
         ("terminals.remove_on_clean_exit", true.into()),
         ("terminals.confirm_close_with_foreground_job", true.into()),
         ("confirm.close_unmonitored_agents", false.into()),
@@ -365,6 +379,10 @@ pub(crate) fn validate(path: &[String], v: &toml::Value) -> Result<(), String> {
         "layout.context_bar" => (
             enum_is(&["auto", "always", "never"]),
             "auto | always | never",
+        ),
+        "power.keep_awake" => (
+            enum_is(&["off", "working", "running"]),
+            "off | working | running",
         ),
         "notify.needs_you"
         | "notify.turn_finished"
