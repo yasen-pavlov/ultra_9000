@@ -2,7 +2,7 @@
 use super::{
     paths::ConfigPaths,
     schema::{
-        defaults, key_name, validate, IconTint, SettingValue, Settings, SettingsError,
+        defaults, key_name, validate, IconTint, KeepAwake, SettingValue, Settings, SettingsError,
         SettingsFile, SettingsState, Source, StatusSource, StoreKind, ToolIcon, ToolKind, ToolSpec,
         TrayShow, WriteTarget, UI_KEYS,
     },
@@ -485,7 +485,7 @@ impl ConfigStore {
         } else if file == self.paths.keys {
             "# Native physical shortcuts. Empty string unbinds an action.\n[bindings]\n# palette = \"Ctrl+Shift+Space\" # Linux; use Cmd+O on macOS\n"
         } else {
-            "# Ultra 9000 settings. Machine files override ultra.toml.\n# [launch]\n# default_tool = \"omp\"\n# [sidebar]\n# width = 304 # 240–360\n# density = \"comfortable\" # comfortable | compact\n# provider_mark = \"corner\" # corner | off\n# auto_collapse_below = 800\n# [icons]\n# brand_color = \"all\" # all | pickers | launch | off\n# [tray]\n# icon = \"light\" # light | dark\n# show = \"auto\" # auto | always | never; auto: hidden while a shell plugin shows Ultra 9000\n# [layout]\n# context_bar = \"auto\" # auto | always | never\n# [notify]\n# needs_you = true\n# turn_finished = false\n# [projects]\n# pinned = []\n# roots = [] # absolute paths; empty means all projects\n# [projects.\"/absolute/project\"]\n# default_tool = \"claude\"\n# [tools.custom]\n# command = \"custom\" # argv data, never shell-evaluated\n# args = []\n# resume = [\"--resume\", \"{id}\"]\n# glyph = \"ag\" # optional letters; omit for the generic agent mark\n# icon = \"icons/custom.svg\" # SVG or PNG, relative to this folder\n# icon_tint = \"mono\" # mono | original\n# icon_fill = false\n# accent = \"#7fdbca\" # colour of single-colour marks\n# [providers.example]\n# icon = \"icons/provider.svg\"\n"
+            "# Ultra 9000 settings. Machine files override ultra.toml.\n# [launch]\n# default_tool = \"omp\"\n# [sidebar]\n# width = 304 # 240–360\n# density = \"comfortable\" # comfortable | compact\n# provider_mark = \"corner\" # corner | off\n# auto_collapse_below = 800\n# [icons]\n# brand_color = \"all\" # all | pickers | launch | off\n# [tray]\n# icon = \"light\" # light | dark\n# show = \"auto\" # auto | always | never; auto: hidden while a shell plugin shows Ultra 9000\n# [layout]\n# context_bar = \"auto\" # auto | always | never\n# [notify]\n# needs_you = true\n# turn_finished = false\n# [power]\n# keep_awake = \"off\" # off | working | running; prevents idle sleep while agents work or items run\n# [projects]\n# pinned = []\n# roots = [] # absolute paths; empty means all projects\n# [projects.\"/absolute/project\"]\n# default_tool = \"claude\"\n# [tools.custom]\n# command = \"custom\" # argv data, never shell-evaluated\n# args = []\n# resume = [\"--resume\", \"{id}\"]\n# glyph = \"ag\" # optional letters; omit for the generic agent mark\n# icon = \"icons/custom.svg\" # SVG or PNG, relative to this folder\n# icon_tint = \"mono\" # mono | original\n# icon_fill = false\n# accent = \"#7fdbca\" # colour of single-colour marks\n# [providers.example]\n# icon = \"icons/provider.svg\"\n"
         };
         write::atomic(file, text.as_bytes())
     }
@@ -639,6 +639,13 @@ fn apply_setting(s: &mut Settings, p: &[String], v: &toml::Value, sourced: bool)
         "layout.context_bar" => s.context_bar = string(v),
         "notify.needs_you" => s.notify_needs_you = v.as_bool().unwrap(),
         "notify.turn_finished" => s.notify_turn_finished = v.as_bool().unwrap(),
+        "power.keep_awake" => {
+            s.keep_awake = match v.as_str() {
+                Some("working") => KeepAwake::Working,
+                Some("running") => KeepAwake::Running,
+                _ => KeepAwake::Off,
+            }
+        }
         "terminals.remove_on_clean_exit" => s.remove_on_clean_exit = v.as_bool().unwrap(),
         "terminals.confirm_close_with_foreground_job" => {
             s.confirm_close_with_foreground_job = v.as_bool().unwrap()

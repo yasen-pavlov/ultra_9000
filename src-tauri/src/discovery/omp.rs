@@ -59,7 +59,10 @@ fn parse_with_stubs(
     let Some(h) = header else {
         return Ok(None);
     };
-    let title = slot.or(h.title).filter(|t| !t.trim().is_empty());
+    let title = slot
+        .or(h.title)
+        .filter(|t| !t.trim().is_empty())
+        .map(crate::omp_link::clean_session_name);
     if hide_stubs && title.is_none() && !assistant {
         return Ok(None);
     }

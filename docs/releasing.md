@@ -183,7 +183,7 @@ The workflow writes the key to `$RUNNER_TEMP/AuthKey_<KEYID>.p8`, exports `APPLE
 
 - No JIT or unsigned executable memory. WKWebView's JavaScript JIT runs in Apple's own WebContent process, and Alacritty's OpenGL renderer uses only system frameworks.
 - Library validation stays on. Only system frameworks and the app's own code are loaded, with no plugins or third-party dylibs.
-- No Apple Events. Notifications run `osascript` with `display notification`, a scripting addition executed inside `osascript` that targets no other app.
+- No Apple Events. Notifications use `UNUserNotificationCenter` in-process, without a helper process, and only from the `.app` bundle; unbundled development runs send none.
 - No sandbox. A terminal host must spawn arbitrary shells and tools in PTYs, so the app is distributed with Developer ID outside the Mac App Store.
 
 Known limitation: macOS attributes privacy (TCC) requests from programs running in a terminal to the terminal app. Tools started inside Ultra 9000 that need the camera, microphone or Apple Events are therefore denied. Supporting them needs both the matching entitlements (`com.apple.security.device.camera`, `com.apple.security.device.audio-input`, `com.apple.security.automation.apple-events`) and `NS*UsageDescription` strings in the app's `Info.plist`.

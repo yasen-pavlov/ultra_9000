@@ -2,12 +2,45 @@
 
 Settings are files you can keep in git, at `~/.config/ultra-9000/` on Linux and macOS (or `$XDG_CONFIG_HOME/ultra-9000`):
 
-- `ultra.toml`: launch defaults, sidebar, notifications, terminals, `[projects]` (pinned, roots, per-project `default_tool`/`name`) and `[tools.<id>]` agent definitions.
+- `ultra.toml`: launch defaults, sidebar, notifications, power, terminals, `[projects]` (pinned, roots, per-project `default_tool`/`name`) and `[tools.<id>]` agent definitions.
 - `terminal.toml`: the embedded terminal's font and colors, in Alacritty config syntax. It is merged over the bundled defaults; your global Alacritty config is never read.
 - `keys.toml`: `[bindings]` shortcut overrides (`action = "Ctrl+Shift+X"`); see [Keyboard shortcuts](#keyboard-shortcuts).
 - `machines/<hostname>.toml`: per-machine overrides. Set `ULTRA_9000_MACHINE` to choose a different file.
 
 Changes apply live where possible. An invalid key keeps its last good value and shows a banner in Settings (Ctrl+Shift+, / Cmd+,). The settings sheet edits a small subset in place and preserves comments. UI memory (sidebar state, folded projects, the last quit's agent set) lives in `~/.local/state/ultra-9000/state.json` (`$XDG_STATE_HOME/ultra-9000/state.json`) and is not a setting.
+
+## Notifications
+
+```toml
+[notify]
+needs_you = true
+turn_finished = false
+```
+
+Notifications are sent as **Ultra 9000**, with its app identity, when an agent needs you or finishes a turn while its item is not presented in the focused main window. Clicking a notification shows the window and selects that item; if the item has closed, it just shows the window. A newer notification for an item replaces its older one. On Wayland, focus activation uses the notification server's token when available and remains subject to compositor policy.
+
+macOS asks for notification permission once; change the choice in System Settings → Notifications → Ultra 9000. Notifications need a signed `.app` bundle: release builds are; a development run sends none, and a locally built bundle needs at least an ad-hoc signature (`codesign --force --deep -s - "Ultra 9000.app"`).
+
+## Keep awake
+
+```toml
+[power]
+keep_awake = "off" # off (default) | working | running
+```
+
+This live setting is also available in the settings sheet:
+
+- `off`: do not inhibit idle sleep.
+- `working`: inhibit while any OMP-monitored agent reports **working** or **on job**. Needs-you and your-turn do not count; exited and failed items never count. Activity is never inferred from output or CPU.
+- `running`: inhibit while any item is starting or running, including idle agents, shells and Neovim.
+
+On **macOS**, Ultra 9000 holds an IOKit `PreventUserIdleSystemSleep` assertion. The display may still sleep, and closing the laptop lid still puts it to sleep. Activity Monitor's **Preventing Sleep** column shows the assertion.
+
+On **Linux**, Ultra 9000 holds a logind `idle` inhibitor labelled **Ultra 9000 keep awake**, honoured by idle daemons such as hypridle. **This also stops idle screen locking while held**; it does not prohibit manual locking or explicit suspend. Inspect it with `systemd-inhibit --list`. The macOS assertion uses the same neutral label, so switching enabled modes never leaves stale reason text in OS tools.
+
+The Linux inhibitor descriptors are marked close-on-exec as soon as they are received by the inhibitor worker, so launched shells and tools do not inherit an established hold. A small cross-thread window remains between D-Bus receiving a descriptor and the worker marking it during acquisition.
+
+Hiding the app does not release an inhibitor while the selected condition still holds. It is released when the condition stops, the setting becomes `off`, or the app exits. Switching enabled modes retains an existing hold. Failed acquisitions retry on later workspace changes after a 30-second backoff, logging only the first consecutive failure; the app keeps running. Turning the setting off and back on permits an immediate new attempt.
 
 ## Single-instance launch
 

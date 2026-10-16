@@ -20,6 +20,38 @@ fn changed(r: Reloaded) -> (bool, bool, bool) {
 }
 
 #[test]
+fn keep_awake_defaults_off_parses_modes_and_retains_last_good_on_error() {
+    let f = Fixture::new();
+    let mut store = ConfigStore::load(f.0.clone());
+    assert_eq!(store.settings().keep_awake, KeepAwake::Off);
+    assert_eq!(
+        value(&store, "power.keep_awake").unwrap().value,
+        json!("off")
+    );
+    for (value, mode) in [
+        ("working", KeepAwake::Working),
+        ("running", KeepAwake::Running),
+        ("off", KeepAwake::Off),
+        ("working", KeepAwake::Working),
+    ] {
+        fs::write(&f.0.ultra, format!("[power]\nkeep_awake='{value}'\n")).unwrap();
+        store.reload();
+        assert!(errors(&store).is_empty());
+        assert_eq!(store.settings().keep_awake, mode);
+    }
+    fs::write(&f.0.ultra, "[power]\nkeep_awake='always'\n").unwrap();
+    store.reload();
+    assert_eq!(store.settings().keep_awake, KeepAwake::Working);
+    assert_eq!(
+        value(&store, "power.keep_awake").unwrap().value,
+        json!("working")
+    );
+    let error = only_error(&store);
+    assert_eq!(error.key.as_deref(), Some("power.keep_awake"));
+    assert_eq!(error.last_good.as_deref(), Some("\"working\""));
+}
+
+#[test]
 fn custom_tools_take_every_configured_field_and_default_the_rest() {
     let f = Fixture::new();
     fs::write(

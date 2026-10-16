@@ -25,7 +25,8 @@ pub(crate) struct FakeHost {
     /// Session effects in order: `create 1`, `stop 1`, `remove 1`, `hide 1`,
     /// `viewport 1 true`, `focus 1`, `reload`, `focus-sidebar`.
     pub(crate) calls: RefCell<Vec<String>>,
-    pub(crate) notifications: RefCell<Vec<(String, String)>>,
+    pub(crate) notifications: RefCell<Vec<(String, String, String)>>,
+    pub(crate) keep_awake: RefCell<Vec<Option<&'static str>>>,
     pub(crate) pin_probes: RefCell<Vec<Vec<PathBuf>>>,
     /// Status-link token effects in order: `link item-1`, `unlink item-1`.
     pub(crate) links: RefCell<Vec<String>>,
@@ -49,6 +50,7 @@ pub(crate) fn install() -> Rc<FakeHost> {
         prepared: RefCell::default(),
         calls: RefCell::default(),
         notifications: RefCell::default(),
+        keep_awake: RefCell::default(),
         links: RefCell::default(),
         pin_probes: RefCell::default(),
         create_error: RefCell::default(),
@@ -306,10 +308,13 @@ impl Host for FakeHost {
     fn window_focused(&self) -> bool {
         self.focused.get()
     }
-    fn notify(&self, summary: &str, body: &str) {
+    fn notify(&self, item: &str, summary: &str, body: &str) {
         self.notifications
             .borrow_mut()
-            .push((summary.into(), body.into()));
+            .push((item.into(), summary.into(), body.into()));
+    }
+    fn keep_awake(&self, reason: Option<&'static str>) {
+        self.keep_awake.borrow_mut().push(reason);
     }
     fn probe_pinned(&self, pinned: Vec<PathBuf>) {
         self.pin_probes.borrow_mut().push(pinned);

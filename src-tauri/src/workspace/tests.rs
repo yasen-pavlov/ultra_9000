@@ -1165,6 +1165,20 @@ mod flows {
     }
 
     #[test]
+    fn working_keep_awake_holds_then_releases_when_the_agent_becomes_idle() {
+        let host = install();
+        set(|w| w.settings.keep_awake = crate::config::KeepAwake::Working);
+        let (id, _) = running(&host, "omp", "/p");
+        host.keep_awake.borrow_mut().clear();
+        host.omp(&id, WORKING);
+        host.omp(&id, r#"{"type":"state","state":"idle"}"#);
+        assert_eq!(
+            *host.keep_awake.borrow(),
+            vec![Some("an agent is working"), None]
+        );
+    }
+
+    #[test]
     fn unseen_turns_and_questions_mark_unread_and_notify_per_settings() {
         let host = install();
         set(|w| w.settings.notify_turn_finished = true);
@@ -1185,8 +1199,8 @@ mod flows {
         assert_eq!(
             *host.notifications.borrow(),
             vec![
-                ("OMP".to_string(), "Your turn".to_string()),
-                ("OMP".to_string(), "Needs you".to_string())
+                (id.clone(), "OMP".to_string(), "Your turn".to_string()),
+                (id.clone(), "OMP".to_string(), "Needs you".to_string())
             ]
         );
     }
@@ -1211,7 +1225,7 @@ mod flows {
         assert_eq!((row.activity, row.unread), (Activity::YourTurn, false));
         assert_eq!(
             *host.notifications.borrow(),
-            vec![("OMP".to_string(), "Needs you".to_string())]
+            vec![(id.clone(), "OMP".to_string(), "Needs you".to_string())]
         );
         // A finished turn after idle is announced, even without passing through working.
         host.omp(&id, DONE);
@@ -1219,7 +1233,7 @@ mod flows {
         assert_eq!((row.activity, row.unread), (Activity::YourTurn, true));
         assert_eq!(
             host.notifications.borrow().last(),
-            Some(&("OMP".to_string(), "Your turn".to_string()))
+            Some(&(id.clone(), "OMP".to_string(), "Your turn".to_string()))
         );
         assert_eq!(host.notifications.borrow().len(), 2);
     }
@@ -1236,7 +1250,7 @@ mod flows {
         host.omp(&id, APPROVAL);
         assert_eq!(
             *host.notifications.borrow(),
-            vec![("OMP".to_string(), "Needs you".to_string())]
+            vec![(id.clone(), "OMP".to_string(), "Needs you".to_string())]
         );
     }
 
@@ -1305,7 +1319,7 @@ mod flows {
         );
         assert_eq!(
             *host.notifications.borrow(),
-            vec![("OMP".to_string(), "Your turn".to_string())]
+            vec![(id.clone(), "OMP".to_string(), "Your turn".to_string())]
         );
     }
 
