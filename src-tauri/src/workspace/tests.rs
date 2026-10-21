@@ -26,6 +26,25 @@ fn lifecycle_state_survives_discrete_event_overflow_in_order() {
     ));
 }
 #[test]
+fn file_clicks_are_lossless_and_ordered_during_bell_overflow() {
+    let mut queue = HostQueue::default();
+    queue.push(1, HostUpdate::OpenFile("file:///first".into()));
+    for _ in 0..1024 {
+        queue.push(2, HostUpdate::Bell);
+    }
+    queue.push(3, HostUpdate::OpenFile("file:///second".into()));
+    assert_eq!(queue.discrete, 512);
+    assert_eq!(queue.events.len(), 514);
+    assert!(matches!(
+        queue.events.front(),
+        Some((1, HostUpdate::OpenFile(uri))) if uri == "file:///first"
+    ));
+    assert!(matches!(
+        queue.events.back(),
+        Some((3, HostUpdate::OpenFile(uri))) if uri == "file:///second"
+    ));
+}
+#[test]
 fn starting_selection_keeps_original_mru_after_background_completion() {
     let a = item("a");
     let mut b = item("b");
@@ -758,6 +777,248 @@ mod flows {
         let agent = anchored("claude", "/p/one");
         assert_eq!(ids(), vec![a.clone(), t.clone(), b, other, agent]);
         assert_eq!(item(&t).cwd, "/p/one/src");
+    }
+
+    /// An OMP cwd inside its project, linking to a file outside that project.
+    fn file_link_source(host: &FakeHost) -> (tempfile::TempDir, String, SessionKey, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let cwd = project.join("subdirectory");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let file = dir.path().join("+file;$(touch injected)%#?{cwd}.png");
+        std::fs::write(&file, "file").unwrap();
+        let uri = tauri::Url::from_file_path(&file).unwrap().to_string();
+        let id = begin_launch(
+            "omp".into(),
+            cwd.to_str().unwrap().into(),
+            project.to_str().unwrap().into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let key = host.complete(&id);
+        (dir, id, key, uri)
+    }
+
+    #[test]
+    fn file_click_opens_new_selected_neovim_after_origin_with_exact_cwd_project_and_argv() {
+        let host = install();
+        let (dir, source, key, uri) = file_link_source(&host);
+        host.omp(&source, WORKING);
+        let other = launch("omp", "/other-project");
+        host_event(key, embed::HostEvent::OpenFile(&uri));
+        select(&other).unwrap();
+        flush_host_events();
+        assert_eq!(host.pending_files(), 1);
+        let third = launch("shell", "/third-project");
+        assert_eq!(active(), Some(third.clone()));
+        host.complete_file();
+
+        let editor = active().unwrap();
+        assert_eq!(ids(), vec![source.clone(), editor.clone(), other, third]);
+        let row = item(&editor);
+        assert_eq!(row.tool, "neovim");
+        assert_eq!(row.cwd, item(&source).cwd);
+        assert_eq!(row.project_id, item(&source).project_id);
+        assert_ne!(row.cwd, dir.path().to_str().unwrap());
+        let expected = vec![
+            "--".to_owned(),
+            dir.path()
+                .join("+file;$(touch injected)%#?{cwd}.png")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        ];
+        let prepared = host.prepared.borrow().last().unwrap().clone();
+        assert_eq!(prepared.tool, "neovim");
+        assert_eq!(prepared.cwd, item(&source).cwd);
+        assert_eq!(prepared.args, expected);
+        host.complete(&editor);
+        assert_eq!(active(), Some(editor.clone()));
+        assert_eq!(item(&source).process, Process::Running);
+        assert_eq!(item(&source).activity, Activity::Working);
+        assert_eq!(host.key(&source), Some(key));
+        assert!(host.calls_of("stop").is_empty());
+        assert!(snap().notices.is_empty());
+
+        // Even an already-open file starts a new item, not a duplicate process in the agent.
+        deliver(key, embed::HostEvent::OpenFile(&uri));
+        host.complete_file();
+        let second = active().unwrap();
+        assert_ne!(second, editor);
+        assert_eq!(ids()[..3], [source, second, editor]);
+    }
+
+    #[test]
+    fn invalid_file_clicks_show_errors_without_preparing_or_stopping_a_process() {
+        let host = install();
+        let (dir, source, key, _) = file_link_source(&host);
+        let missing = tauri::Url::from_file_path(dir.path().join("missing"))
+            .unwrap()
+            .to_string();
+        let directory = tauri::Url::from_file_path(dir.path()).unwrap().to_string();
+        for uri in [
+            missing.as_str(),
+            directory.as_str(),
+            "file://remote.example/etc/passwd",
+            "file:///bad%ZZ",
+            "file:///dev/null",
+        ] {
+            deliver(key, embed::HostEvent::OpenFile(uri));
+            host.complete_file();
+            assert_eq!(ids(), vec![source.clone()]);
+            assert_eq!(host.prepared.borrow().len(), 1);
+            assert_eq!(active(), Some(source.clone()));
+            let notice = snap().notices.pop().unwrap();
+            assert_eq!(notice.kind, "error");
+            assert_eq!(notice.title, "Action failed");
+            assert!(!notice.body.is_empty());
+        }
+        assert!(host.calls_of("stop").is_empty());
+    }
+
+    #[test]
+    fn file_validation_results_from_closed_removed_or_quitting_origins_are_ignored() {
+        for race in ["closing", "removed", "quitting", "restarted"] {
+            let host = install();
+            let (_dir, source, key, uri) = file_link_source(&host);
+            deliver(key, embed::HostEvent::OpenFile(&uri));
+            assert_eq!(host.pending_files(), 1);
+            match race {
+                "closing" => {
+                    close(&source, true).unwrap();
+                }
+                "removed" => {
+                    close(&source, true).unwrap();
+                    host.exit(key, Some(0));
+                }
+                "quitting" => {
+                    quit_snapshot().unwrap();
+                }
+                "restarted" => {
+                    host.exit(key, Some(7));
+                    let (tool, cwd, project, conversation, extra) =
+                        restart_target(&source).unwrap();
+                    let restarted =
+                        begin_launch(tool, cwd, project, conversation, None, Some(source), extra)
+                            .unwrap();
+                    host.complete(&restarted);
+                }
+                _ => unreachable!(),
+            }
+            let prepared = host.prepared.borrow().len();
+            let before = ids();
+            host.complete_file();
+            assert_eq!(ids(), before, "{race}");
+            assert_eq!(host.prepared.borrow().len(), prepared, "{race}");
+            assert!(
+                snap().notices.iter().all(|notice| notice.kind != "error"),
+                "{race}"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_queued_file_events_do_not_start_validation() {
+        for race in ["closing", "removed", "quitting", "unknown-key"] {
+            let host = install();
+            let (_dir, source, key, uri) = file_link_source(&host);
+            match race {
+                "closing" => {
+                    close(&source, true).unwrap();
+                }
+                "removed" => {
+                    close(&source, true).unwrap();
+                    host.exit(key, Some(0));
+                }
+                "quitting" => {
+                    quit_snapshot().unwrap();
+                }
+                _ => {}
+            }
+            let event_key = if race == "unknown-key" {
+                key + 999
+            } else {
+                key
+            };
+            deliver(event_key, embed::HostEvent::OpenFile(&uri));
+            assert_eq!(host.pending_files(), 0, "{race}");
+            assert_eq!(host.prepared.borrow().len(), 1, "{race}");
+            assert!(snap().notices.is_empty(), "{race}");
+        }
+    }
+
+    #[test]
+    fn retained_exited_output_keeps_file_links_usable_even_during_validation() {
+        for exits_before_click in [false, true] {
+            let host = install();
+            let (_dir, source, key, uri) = file_link_source(&host);
+            if exits_before_click {
+                host.exit(key, Some(7));
+            }
+            deliver(key, embed::HostEvent::OpenFile(&uri));
+            if !exits_before_click {
+                host.exit(key, Some(7));
+            }
+            host.complete_file();
+            let editor = active().unwrap();
+            assert_ne!(editor, source);
+            assert_eq!(item(&source).process, Process::Exited);
+            assert_eq!(item(&editor).tool, "neovim");
+            assert_eq!(item(&editor).cwd, item(&source).cwd);
+            host.complete(&editor);
+            assert_eq!(item(&editor).process, Process::Running);
+        }
+    }
+
+    #[test]
+    fn accepted_file_open_is_an_independent_sibling_if_origin_closes_during_preparation() {
+        let host = install();
+        let (_dir, source, key, uri) = file_link_source(&host);
+        deliver(key, embed::HostEvent::OpenFile(&uri));
+        host.complete_file();
+        let editor = active().unwrap();
+        assert_eq!(item(&editor).process, Process::Starting);
+        close(&source, true).unwrap();
+        host.exit(key, Some(0));
+        host.complete(&editor);
+        assert_eq!(ids(), vec![editor.clone()]);
+        assert_eq!(item(&editor).process, Process::Running);
+        assert_eq!(active(), Some(editor));
+        assert!(snap().notices.is_empty());
+    }
+
+    #[test]
+    fn file_open_uses_normal_missing_neovim_failure_and_preserves_file_args_on_restart() {
+        let host = install();
+        let (_dir, source, key, uri) = file_link_source(&host);
+        deliver(key, embed::HostEvent::OpenFile(&uri));
+        host.complete_file();
+        let editor = active().unwrap();
+        let prepared = host.prepared.borrow().last().unwrap().clone();
+        host.fail(
+            &editor,
+            "Neovim (nvim) was not found on your login shell's PATH.",
+        );
+        assert_eq!(item(&editor).process, Process::Failed);
+        assert_eq!(
+            snap().notices.last().unwrap().body,
+            item(&editor).failure.unwrap()
+        );
+        let (tool, cwd, project, conversation, extra) = restart_target(&editor).unwrap();
+        assert_eq!(cwd, item(&source).cwd);
+        assert_eq!(project, item(&source).project_id);
+        assert_eq!(extra, Some(prepared.args.clone()));
+        let restarted =
+            begin_launch(tool, cwd, project, conversation, None, Some(editor), extra).unwrap();
+        assert_eq!(host.prepared.borrow().last().unwrap().args, prepared.args);
+        assert_eq!(ids(), vec![source.clone(), restarted.clone()]);
+        host.complete(&restarted);
+        assert_eq!(item(&source).process, Process::Running);
+        assert_eq!(active(), Some(restarted));
+        assert!(host.calls_of("stop").is_empty());
     }
 
     #[test]

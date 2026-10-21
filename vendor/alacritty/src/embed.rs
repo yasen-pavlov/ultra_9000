@@ -26,7 +26,8 @@
 //!   PTY and hands keyboard focus (first responder) to the web view first, so a hidden terminal never keeps
 //!   keyboard focus. Stopping a session ends its PTY but keeps its display and final content;
 //!   only removing it releases the display and view.
-//! - The state listener runs outside every session borrow and may call back into this module.
+//! - The host listener (state, bell and raw file-link URI) runs outside every session borrow
+//!   and may call back into this module; discrete events share a bell-bounded FIFO.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -143,6 +144,8 @@ pub struct Launch {
 pub enum HostEvent<'a> {
     State(&'a TerminalState),
     Bell,
+    /// Activated file URI, unchanged from the terminal hint.
+    OpenFile(&'a str),
 }
 
 pub type HostListener = Box<dyn Fn(SessionKey, HostEvent<'_>)>;
@@ -975,7 +978,7 @@ fn pump(key: SessionKey) {
             host.last_state = Some(state.clone());
             state
         });
-        // embed: Transfer the bounded FIFO out of the host borrow before delivery.
+        // embed: Transfer the FIFO out of the host borrow before delivery.
         let events = host.processor.window_context_mut()
             .map(|window| window.take_host_events()).unwrap_or_default();
         (deadline, notify, events)
@@ -1008,6 +1011,8 @@ fn pump(key: SessionKey) {
             match event {
                 window_context::PendingHostEvent::Bell =>
                     (embedder.listener)(key, HostEvent::Bell),
+                window_context::PendingHostEvent::OpenFile(uri) =>
+                    (embedder.listener)(key, HostEvent::OpenFile(&uri)),
             }
         }
     }

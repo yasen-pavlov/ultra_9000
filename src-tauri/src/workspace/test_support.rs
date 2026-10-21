@@ -40,6 +40,7 @@ pub(crate) struct FakeHost {
     pub(crate) focused: Cell<bool>,
     sessions: RefCell<BTreeMap<SessionKey, Session>>,
     next_key: Cell<SessionKey>,
+    file_requests: RefCell<VecDeque<(FileOrigin, String)>>,
 }
 /// Installs a fresh workspace on the current thread, with an attached terminal host, a
 /// presentable focused window and `/` as default directory. Replaces any previous one.
@@ -60,6 +61,7 @@ pub(crate) fn install() -> Rc<FakeHost> {
         focused: Cell::new(true),
         sessions: RefCell::default(),
         next_key: Cell::new(1),
+        file_requests: RefCell::default(),
     });
     let mut workspace = Workspace::new(host.clone());
     workspace.host_error = None;
@@ -69,6 +71,20 @@ pub(crate) fn install() -> Rc<FakeHost> {
     host
 }
 impl FakeHost {
+    /// Number of file clicks waiting for their worker to finish.
+    pub(crate) fn pending_files(&self) -> usize {
+        self.file_requests.borrow().len()
+    }
+    /// Completes the next file-validation worker using the real URI/filesystem validation.
+    pub(crate) fn complete_file(&self) {
+        let (origin, uri) = self
+            .file_requests
+            .borrow_mut()
+            .pop_front()
+            .expect("no file validation was requested");
+        let args = file_links::validate(&uri, &origin.cwd);
+        finish_file_link(origin, args);
+    }
     /// Completes a prepared launch: the session starts running.
     pub(crate) fn complete(&self, id: &str) -> SessionKey {
         let cwd = self.prepared_launch(id).cwd;
@@ -200,6 +216,9 @@ impl Host for FakeHost {
             args,
             linked: link.is_some(),
         });
+    }
+    fn prepare_file(&self, origin: FileOrigin, uri: String) {
+        self.file_requests.borrow_mut().push_back((origin, uri));
     }
     fn link(&self, item: &str) -> Option<Credentials> {
         self.links.borrow_mut().push(format!("link {item}"));

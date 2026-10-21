@@ -89,9 +89,9 @@ const questions = new Set<string>();
 let retrying = false;
 let compacting = false;
 /**
- * Main runs started and ended in this session. OMP emits `agent_end` to extensions without awaiting
- * it and only after other extensions' `session_stop` handlers, so slow handlers can deliver it late
- * or out of order: a run is over only once every started run has ended.
+ * Main runs started and ended since the session boundary or last quiet fallback. OMP emits
+ * `agent_end` without awaiting it and after other extensions' `session_stop` handlers, so
+ * notifications can arrive late or out of order.
  */
 let starts = 0;
 let ends = 0;
@@ -103,6 +103,12 @@ let ends = 0;
  */
 let candidate: { messages: AgentMessage[]; at: number } | undefined;
 let watermark = 0;
+/** Session boundary, distinct from the advancing outcome watermark, for rejecting provably old ends. */
+let sessionStartedAt = 0;
+/** Ends from before a quiet fallback may update the outcome, but not the rebased counters. */
+let countersSince = 0;
+/** Rebased counters alone cannot announce a candidate left by an earlier, incomplete run. */
+let awaitingNewEnd = false;
 let quietPolls = 0;
 /**
  * Whether the newest main `agent_end` said OMP continues. Only then is queued input proof of a
@@ -121,7 +127,7 @@ const sent = new Map<Kind, string>();
 
 /**
  * Reports the run as over, from the candidate end the way OMP's TUI reads `agent_end` messages, or
- * as `idle` for the fallback, which leaves the candidate for a later barrier settle.
+ * as `idle` for the fallback; a kept candidate is only a timestamp floor until another end arrives.
  */
 function settle(withOutcome: boolean): void {
   approvals.clear();
@@ -134,6 +140,15 @@ function settle(withOutcome: boolean): void {
       watermark = candidate.at;
     }
     candidate = undefined;
+    awaitingNewEnd = false;
+  } else {
+    // A lost or previous-session start must not skew every later turn. Late current-session
+    // outcomes are still accepted, but their already-abandoned runs must not be counted again.
+    starts = 0;
+    ends = 0;
+    countersSince = Date.now();
+    lastEndContinues = false;
+    awaitingNewEnd = true;
   }
   const last = messages?.findLast((message) => message.role === "assistant");
   if (retrying || !last || last.stopReason === "aborted") status = { state: "idle" };
@@ -151,7 +166,7 @@ function settle(withOutcome: boolean): void {
  */
 function checkSettle(ctx: Context, polling: boolean): void {
   const running = status.state === "working" || status.state === "waiting";
-  if (!running && !(candidate && candidate.at > watermark)) return;
+  if (!running && (awaitingNewEnd || !(candidate && candidate.at > watermark))) return;
   if (!ctx.isIdle() || (lastEndContinues && ctx.hasPendingMessages()) || retrying || compacting) {
     quietPolls = 0;
     return;
@@ -168,7 +183,7 @@ function checkSettle(ctx: Context, polling: boolean): void {
     };
     return;
   }
-  if (ends >= starts) settle(true);
+  if (ends >= starts && !awaitingNewEnd) settle(true);
   else if (running && polling && ++quietPolls >= FALLBACK_POLLS) settle(false);
 }
 
@@ -281,9 +296,12 @@ export default function ultra9000Status(pi: ExtensionApi): void {
     starts = 0;
     ends = 0;
     candidate = undefined;
-    // Narrow edge: a slow earlier handler of this session event could let a run stamp messages
-    // before this time; such a run then reports `idle`.
-    watermark = Date.now();
+    // A slow earlier session-event handler can let a run stamp messages before this boundary.
+    // Its rejected end then leaves the quiet fallback to settle and rebase the counters.
+    sessionStartedAt = Date.now();
+    watermark = sessionStartedAt;
+    countersSince = sessionStartedAt;
+    awaitingNewEnd = false;
     quietPolls = 0;
     lastEndContinues = false;
     approvals.clear();
@@ -313,11 +331,18 @@ export default function ultra9000Status(pi: ExtensionApi): void {
   listen("main", "agent_end", (event, ctx) => {
     const messages = event.messages ?? [];
     const at = messages.at(-1)?.timestamp ?? 0;
-    // Every end counts, even one delivered before its own `agent_start` (a slow earlier handler). A
-    // late end of an earlier session also counts here; that only leaves the quiet check as barrier.
-    ends += 1;
-    lastEndContinues = event.willContinue === true;
-    if (at > watermark && (!candidate || at >= candidate.at)) candidate = { messages, at };
+    // An earlier session's delayed end must not count against the current session's starts,
+    // or the next real start is mistaken for a completed late start and remains idle.
+    if (at > 0 && at < sessionStartedAt) return;
+    // Current-session ends before the fallback boundary can still supply a late outcome.
+    if (at === 0 || at >= countersSince) {
+      ends += 1;
+      lastEndContinues = event.willContinue === true;
+    }
+    if (at > watermark && (!candidate || at >= candidate.at)) {
+      candidate = { messages, at };
+      awaitingNewEnd = false;
+    }
     checkSettle(ctx, false);
   });
   listen("main", "auto_retry_start", () => (retrying = true));

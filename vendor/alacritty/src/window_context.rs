@@ -18,6 +18,8 @@
 //!   session. Stopping a session's PTY (`begin_shutdown`) is separate from dropping its
 //!   display, so a stopped session keeps its final terminal content until it is removed.
 //! - embed: Removed unreachable touch state and standalone message buffers/plumbing.
+//! - embed: BEL and default-opener file-link activations share a bell-bounded host-event FIFO;
+//!   action contexts borrow the queue directly, and only the pump delivers callbacks.
 
 use std::error::Error;
 use std::collections::VecDeque;
@@ -62,9 +64,25 @@ const SHUTDOWN_MARGIN: Duration = Duration::from_millis(500);
 type PtyThread = JoinHandle<(PtyEventLoop<Pty, EventProxy>, State)>;
 
 
-// embed: Discrete host events, FIFO bounded independently of terminal-state snapshots.
-pub(crate) enum PendingHostEvent { Bell }
+// embed: Discrete host FIFO; bell overflow never discards user-activated file links.
+pub(crate) enum PendingHostEvent {
+    Bell,
+    OpenFile(String),
+}
 const HOST_EVENT_LIMIT: usize = 128;
+
+/// embed: Shared overflow policy; only bells may be discarded, never file clicks.
+pub(crate) fn push_host_event(queue: &mut VecDeque<PendingHostEvent>, event: PendingHostEvent) {
+    if queue.len() >= HOST_EVENT_LIMIT {
+        if let Some(oldest) = queue.iter().position(|event| matches!(event, PendingHostEvent::Bell)) {
+            queue.remove(oldest);
+        } else if matches!(event, PendingHostEvent::Bell) {
+            return;
+        }
+    }
+    queue.push_back(event);
+}
+
 /// Event context for one individual Alacritty window.
 pub struct WindowContext {
     pub display: Display,
@@ -89,7 +107,7 @@ pub struct WindowContext {
     io_thread: Option<PtyThread>,
     /// embed: Child exit status, once the child exited.
     child_exit: Option<Option<i32>>,
-    // embed: At most 128 events.
+    // embed: Bell-bounded FIFO; file clicks remain lossless.
     host_events: VecDeque<PendingHostEvent>,
 }
 
@@ -255,10 +273,9 @@ impl WindowContext {
         self.display.window.request_redraw();
     }
 
-    /// embed: Drop oldest on overflow; BEL retains its normal Alacritty visual handling.
+    /// embed: Only bells overflow; BEL retains its normal Alacritty visual handling.
     pub(crate) fn push_host_event(&mut self, event: PendingHostEvent) {
-        if self.host_events.len() == HOST_EVENT_LIMIT { self.host_events.pop_front(); }
-        self.host_events.push_back(event);
+        push_host_event(&mut self.host_events, event);
     }
 
     pub(crate) fn take_host_events(&mut self) -> VecDeque<PendingHostEvent> {
@@ -338,6 +355,7 @@ impl WindowContext {
             mouse: &mut self.mouse,
             dirty: &mut self.dirty,
             occluded: &mut self.occluded,
+            host_events: &mut self.host_events,
             terminal: &mut terminal,
             #[cfg(not(windows))]
             master_fd: self.master_fd,
@@ -416,6 +434,7 @@ impl WindowContext {
             mouse: &mut self.mouse,
             dirty: &mut self.dirty,
             occluded: &mut self.occluded,
+            host_events: &mut self.host_events,
             terminal: &mut terminal,
             #[cfg(not(windows))]
             master_fd: self.master_fd,
