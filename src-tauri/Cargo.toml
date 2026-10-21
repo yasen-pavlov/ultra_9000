@@ -141,7 +141,7 @@ gtk = "0.18"
 [dev-dependencies]
 tempfile = "3"
 # Mock runtime (`tauri::test`) for headless command and lifecycle tests.
-tauri = { version = "=2.12.1", features = ["test"] }
+tauri = { version = "=2.12.2", features = ["test"] }
 
 # tests/gui_macos.rs reads the application menu AppKit installed and synthesizes a key event
 # for the application key router.
