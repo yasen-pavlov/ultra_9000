@@ -137,7 +137,7 @@ fn symlinked_files_keep_the_clicked_path_and_non_utf8_never_becomes_lossy_argv()
     assert_eq!(validate(&uri, "/").unwrap()[1], link.to_str().unwrap());
 
     let non_utf8 = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
-    fs::write(&non_utf8, "file").unwrap();
+    // Rejection precedes metadata: APFS cannot create this name, and no file is needed.
     let uri = tauri::Url::from_file_path(&non_utf8).unwrap().to_string();
     assert!(validate(&uri, "/").unwrap_err().contains("UTF-8"));
 }
