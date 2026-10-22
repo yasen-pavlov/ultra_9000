@@ -75,8 +75,9 @@ input {
   color: inherit;
 }
 
-[hidden] {
-  display: none !important;
+/* Root specificity keeps hidden attributes stronger than component display rules. */
+#app [hidden] {
+  display: none;
 }
 
 :focus {
