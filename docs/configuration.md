@@ -54,6 +54,14 @@ Debug builds use `instance-debug.lock` and do not hand over to the installed rel
 
 Startup fails rather than starting an unprotected instance if the runtime directory is not private. The error names its path, whether you own it, and its mode: it must be a non-symlink directory owned by you, with no group/other access (normally mode 0700). Set `XDG_RUNTIME_DIR` on Linux, or `TMPDIR` on macOS, to a private directory owned by you. If the app's runtime directory is abandoned or squatted, remove it only after ensuring no Ultra 9000 instance is using it; never delete a live lock file.
 
+## Terminal file links
+
+Clicking a local `file://` link in the terminal, including OMP's file links, opens the file in a **new Neovim item** and selects it. The editor appears immediately after the originating item in the same project and starts in that item's working folder, not the file's parent folder. The originating item keeps running; links in retained exited output also work.
+
+Existing regular files are accepted regardless of extension; there is no text-file filter. Missing files, directory links, special files, remote file hosts and malformed file URLs show an error instead of launching an editor. Empty/`localhost` authorities and this machine's hostname identify local files. URL-encoded spaces, Unicode and reserved filename characters are decoded as literal path data. Line/column query parameters and fragments are not used for cursor positioning.
+
+Neovim uses the normal `[tools.neovim]` command and arguments and must be available on the login-shell PATH. Web links still use the system opener. Custom terminal hint commands and copy/select actions remain unchanged; this routing applies to the default `open` / `xdg-open` hint action with no configured arguments. No global OMP, Neovim or Alacritty settings are changed.
+
 ## Keyboard shortcuts
 
 App shortcuts work while the terminal or the web view has focus. They match the **physical key**, so they work under any keyboard layout. Override them in `keys.toml` with the action names below, for example:

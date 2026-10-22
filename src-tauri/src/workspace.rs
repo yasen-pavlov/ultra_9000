@@ -25,6 +25,9 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 
+mod file_links;
+use file_links::FileOrigin;
+
 pub const WORKSPACE_STATE_EVENT: &str = "workspace-state";
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -296,6 +299,8 @@ trait Host {
         args: Vec<String>,
         link: Option<Credentials>,
     );
+    /// Validate a clicked local file off-main, then launch it on main after rechecking its origin.
+    fn prepare_file(&self, origin: FileOrigin, uri: String);
     /// Status-link credentials for an OMP launch of `item`, if the link runs.
     fn link(&self, item: &str) -> Option<Credentials>;
     /// Invalidate `item`'s status-link token.
@@ -361,6 +366,12 @@ impl Host for Native {
             });
             let prepared = launch::prepare(&spec, &cwd, args, link.as_ref());
             platform::defer_on_main(Box::new(move || finish_launch(&id, prepared)));
+        });
+    }
+    fn prepare_file(&self, origin: FileOrigin, uri: String) {
+        std::thread::spawn(move || {
+            let args = file_links::validate(&uri, &origin.cwd);
+            platform::defer_on_main(Box::new(move || finish_file_link(origin, args)));
         });
     }
     fn link(&self, item: &str) -> Option<Credentials> {
@@ -480,6 +491,7 @@ struct Workspace {
 enum HostUpdate {
     State(TerminalState),
     Bell,
+    OpenFile(String),
 }
 #[derive(Default)]
 struct HostQueue {
@@ -488,13 +500,13 @@ struct HostQueue {
 }
 impl HostQueue {
     fn push(&mut self, key: SessionKey, update: HostUpdate) {
-        if !matches!(update, HostUpdate::State(_)) {
+        if matches!(update, HostUpdate::Bell) {
             if self.discrete == 512 {
-                // Never evict lifecycle state, even during a burst of bells.
+                // Only bells are expendable; lifecycle state and file clicks stay ordered.
                 let oldest = self
                     .events
                     .iter()
-                    .position(|(_, event)| !matches!(event, HostUpdate::State(_)))
+                    .position(|(_, event)| matches!(event, HostUpdate::Bell))
                     .unwrap();
                 self.events.remove(oldest);
             } else {
@@ -1387,6 +1399,7 @@ fn host_event(key: SessionKey, event: embed::HostEvent<'_>) {
     let update = match event {
         embed::HostEvent::State(s) => HostUpdate::State(s.clone()),
         embed::HostEvent::Bell => HostUpdate::Bell,
+        embed::HostEvent::OpenFile(uri) => HostUpdate::OpenFile(uri.to_owned()),
     };
     HOST_EVENTS.with(|events| events.borrow_mut().push(key, update));
     if !FLUSH_SCHEDULED.with(|scheduled| scheduled.replace(true)) {
@@ -1396,13 +1409,43 @@ fn host_event(key: SessionKey, event: embed::HostEvent<'_>) {
 fn flush_host_events() {
     FLUSH_SCHEDULED.with(|scheduled| scheduled.set(false));
     let events = HOST_EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
-    let _ = with(|w| {
+    if let Ok((host, files)) = with(|w| {
+        let mut files = Vec::new();
         for (key, event) in events.events {
-            w.apply_host_event(key, event)?;
+            if let Some(file) = w.apply_host_event(key, event)? {
+                files.push(file);
+            }
         }
         w.refresh_recent();
-        Ok(())
+        Ok((w.host.clone(), files))
+    }) {
+        // Neither the host-event queue nor the workspace may be borrowed while dispatching.
+        for (origin, uri) in files {
+            host.prepare_file(origin, uri);
+        }
+    }
+}
+fn finish_file_link(origin: FileOrigin, args: Result<Vec<String>, String>) {
+    // Session identity, not current selection, determines both the cwd and sidebar anchor.
+    // Main-thread execution makes this check and begin_launch atomic with respect to close/quit.
+    let current = with(|w| Ok(w.file_link_origin(origin.key).as_ref() == Some(&origin)));
+    if current != Ok(true) {
+        return;
+    }
+    let result = args.and_then(|args| {
+        begin_launch(
+            "neovim".into(),
+            origin.cwd,
+            origin.project,
+            None,
+            Some(origin.item),
+            None,
+            Some(args),
+        )
     });
+    if let Err(error) = result {
+        action_error(error);
+    }
 }
 /// Argv for a launch: configured args, then file-open extras or the tool's resume args.
 fn launch_args(
@@ -1860,26 +1903,48 @@ impl Workspace {
         self.recent.retain(|i| i != old);
         Ok(position)
     }
-    fn apply_host_event(&mut self, key: SessionKey, event: HostUpdate) -> Result<(), String> {
+    fn file_link_origin(&self, key: SessionKey) -> Option<FileOrigin> {
+        if self.quitting {
+            return None;
+        }
+        self.records
+            .iter()
+            .find(|r| r.key == Some(key) && !r.closing)
+            .map(|r| FileOrigin {
+                key,
+                item: r.state.id.clone(),
+                cwd: r.state.cwd.clone(),
+                project: r.state.project_id.clone(),
+            })
+    }
+    fn apply_host_event(
+        &mut self,
+        key: SessionKey,
+        event: HostUpdate,
+    ) -> Result<Option<(FileOrigin, String)>, String> {
+        let state = match event {
+            HostUpdate::OpenFile(uri) => {
+                return Ok(self.file_link_origin(key).map(|origin| (origin, uri)));
+            }
+            HostUpdate::State(state) => Some(state),
+            HostUpdate::Bell => None,
+        };
         let Some(index) = self.records.iter().position(|r| r.key == Some(key)) else {
-            return Ok(());
+            return Ok(None);
         };
         let presented = self.is_presented(index);
         let record = &mut self.records[index];
         let before = record.observed();
         let was_quiet = record.quiet();
-        let title_source_changed = match event {
-            HostUpdate::State(state) => {
-                record.apply_terminal_state(state, &mut self.discovery_revision)
-            }
-            HostUpdate::Bell => false,
-        };
+        let title_source_changed = state
+            .is_some_and(|state| record.apply_terminal_state(state, &mut self.discovery_revision));
         let title_changed = title_source_changed && record.refresh_title();
         if record.omp.is_some() && record.state.process != before.0 {
             // The process ended: its token must not report for it any more.
             self.host.unlink(&record.state.id);
         }
-        self.settle(index, presented, (before, was_quiet), title_changed)
+        self.settle(index, presented, (before, was_quiet), title_changed)?;
+        Ok(None)
     }
     /// Applies a status-link message to its running OMP item. Messages from a connection older
     /// than the newest one heard from were superseded and are dropped.

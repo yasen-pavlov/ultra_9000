@@ -21,6 +21,8 @@
 //!   subsurface on Linux; the macOS-only `ActiveEventLoop` exists only there, as upstream.
 //! - embed: Unreachable touchscreen gestures, standalone message-bar handling and unused
 //!   processor config access are removed; native hosts produce neither touch nor log notices.
+//! - embed: Activated file URIs using the default platform opener are queued for the host,
+//!   not spawned; custom commands, internal hint actions and input gating stay upstream.
 
 use std::borrow::Cow;
 use std::cmp::min;
@@ -47,7 +49,7 @@ use alacritty_terminal::term::{self, ClipboardType, Term, TermMode};
 use alacritty_terminal::vte::ansi::NamedColor;
 
 use crate::clipboard::Clipboard;
-use crate::config::ui_config::{HintAction, HintInternalAction};
+use crate::config::ui_config::{HintAction, HintInternalAction, Program};
 use crate::config::UiConfig;
 use crate::daemon::spawn_daemon;
 use crate::display::color::Rgb;
@@ -62,7 +64,7 @@ use crate::host::{
 use crate::input::{self, ActionContext as _};
 use crate::platform::embedder::View;
 use crate::scheduler::{Scheduler, TimerId, Topic};
-use crate::window_context::WindowContext;
+use crate::window_context::{self, PendingHostEvent, WindowContext};
 
 /// Duration after the last user input until an unlimited search is performed.
 pub const TYPING_SEARCH_DELAY: Duration = Duration::from_millis(500);
@@ -72,6 +74,13 @@ const MAX_SEARCH_WHILE_TYPING: Option<usize> = Some(1000);
 
 /// Maximum number of search terms stored in the history.
 const MAX_SEARCH_HISTORY_SIZE: usize = 255;
+
+/// embed: Only the default URL opener delegates file URIs to the host.
+fn is_host_file_hint(command: &Program, text: &str) -> bool {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    command.program() == opener && command.args().is_empty()
+        && text.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+}
 
 /// The event processor.
 ///
@@ -432,6 +441,7 @@ pub struct ActionContext<'a, N, T> {
     pub inline_search_state: &'a mut InlineSearchState,
     pub dirty: &'a mut bool,
     pub occluded: &'a mut bool,
+    pub(crate) host_events: &'a mut VecDeque<PendingHostEvent>,
     pub preserve_title: bool,
     #[cfg(not(windows))]
     pub master_fd: RawFd,
@@ -898,6 +908,14 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         match &hint.action() {
             // Launch an external program.
             HintAction::Command(command) => {
+                // embed: Deliver outside terminal/session borrows through the existing pump.
+                if is_host_file_hint(command, &text) {
+                    window_context::push_host_event(
+                        self.host_events,
+                        PendingHostEvent::OpenFile(text.into_owned()),
+                    );
+                    return;
+                }
                 let mut args = command.args().to_vec();
                 args.push(text.into());
                 self.spawn_daemon(command.program(), &args);
@@ -1598,3 +1616,6 @@ impl EventListener for EventProxy {
         let _ = self.proxy.send_event(Event::new(event.into(), self.window_id));
     }
 }
+
+#[cfg(test)]
+mod tests;
