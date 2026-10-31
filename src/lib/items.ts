@@ -1,6 +1,6 @@
 // How one item reads everywhere (sidebar row, collapsed icon, palette, context bar, quit list):
 // state glyph + word, never colour alone (design board 20/21).
-import { clockTime, modelShort, shortAge, tildePath } from "./format";
+import { clockTime, modelShort, shortAge, spokenAge, tildePath } from "./format";
 import type { Attention, ItemState, ToolInfo } from "./native";
 
 export type Badge = "" | "start" | "work" | "wait" | "need" | "err" | "exit" | "job";
@@ -21,8 +21,14 @@ export interface ItemView {
   subIsError: boolean;
   /** Short state wording: "working", "needs approval", "your turn", "exited 1". */
   stateText: string;
-  /** Row modifier: exited/error rows dim their tile; failed attempts read as pending. */
-  rowClass: "" | "exited" | "pending";
+  /** Row modifier: exited/error rows dim their tile; failed attempts read as pending; a document whose path is gone reads as gone. */
+  rowClass: "" | "exited" | "pending" | "gone";
+  /**
+   * Documents only (board 30): the project-relative directory (cut at the start by the row), the
+   * tail after it (age, “live” or “moved or deleted”) and whether the tail is “live” (5 s after a
+   * write; drawn with a static dot, never a pill).
+   */
+  doc: { dir: string; tail: string; live: boolean } | null;
 }
 
 export interface ItemViewContext {
@@ -57,6 +63,8 @@ function runningStateText(item: ItemState): string {
 
 function stateText(item: ItemState): string {
   switch (item.process) {
+    case null:
+      return "document";
     case "starting":
       return "starting…";
     case "failed":
@@ -169,6 +177,52 @@ export function onJobNote(item: ItemState): string {
   return [...item.backgroundJobs.map((job) => job.label), "you can type; the agent resumes when they end"].join(" · ");
 }
 
+/**
+ * A document row (board 30): file name, then directory · age, “live” for 5 s after a write, or
+ * “moved or deleted” once the path is gone. No badge, no pill, no state colour.
+ */
+function applyDocument(view: ItemView, item: ItemState, now: number): void {
+  const doc = item.document;
+  if (doc === null) return;
+  if (doc.status === "missing") {
+    view.rowClass = "gone";
+    view.stateText = "moved or deleted";
+    view.doc = { dir: doc.dir, tail: "moved or deleted", live: false };
+  } else {
+    const live = doc.liveUntilMs > now;
+    view.stateText = live ? "live" : `modified ${spokenAge(doc.modifiedMs, now)} ago`;
+    view.doc = { dir: doc.dir, tail: live ? "live" : shortAge(doc.modifiedMs, now), live };
+  }
+  view.sub = `${doc.dir} · ${view.doc.tail}`;
+}
+
+/**
+ * The row's accessible name. Process rows: “title, project, tool, state”; documents (board 30):
+ * “importer-rollover.md, docs/reviews, atlas, document, modified 2 min ago”.
+ */
+export function rowLabel(view: ItemView, dis: string, project: string, toolLabel: string): string {
+  if (view.doc !== null) return `${view.title}${dis}, ${view.doc.dir}, ${project}, document, ${view.stateText}`;
+  return `${view.title}${dis}, ${project}, ${toolLabel}, ${view.stateText}`;
+}
+
+/**
+ * The quit sheet's two lists (boards 15, 30): the items quitting ends, in the sheet's order, and
+ * the open documents, listed apart because they need no stopping and never raise the count.
+ */
+export function quitLists(
+  itemIds: readonly string[],
+  items: readonly ItemState[],
+): { ending: ItemState[]; documents: ItemState[] } {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  return {
+    ending: itemIds.flatMap((id) => {
+      const item = byId.get(id);
+      return item === undefined || item.kind === "document" ? [] : [item];
+    }),
+    documents: items.filter((item) => item.kind === "document"),
+  };
+}
+
 export function itemView(item: ItemState, context: ItemViewContext): ItemView {
   const label = context.tool?.label ?? item.tool;
   const view: ItemView = {
@@ -183,9 +237,13 @@ export function itemView(item: ItemState, context: ItemViewContext): ItemView {
     subIsError: false,
     stateText: stateText(item),
     rowClass: "",
+    doc: null,
   };
 
   switch (item.process) {
+    case null:
+      applyDocument(view, item, context.now);
+      break;
     case "starting":
       view.title = `Starting ${label}…`;
       view.badge = "start";

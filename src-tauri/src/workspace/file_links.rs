@@ -12,6 +12,7 @@ pub(super) enum FileTarget {
     Neovim(String),
     System(String),
     Reveal(String),
+    Document(Box<crate::documents::Loaded>, String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -29,6 +30,12 @@ pub(super) struct FileOrigin {
     pub item: String,
     pub cwd: String,
     pub project: String,
+    pub markdown_view: bool,
+    pub roots: Vec<std::path::PathBuf>,
+}
+
+pub(super) fn validate_origin(origin: &FileOrigin, uri: &str) -> Result<FileTarget, String> {
+    validate(uri, &origin.cwd, origin.markdown_view, &origin.roots)
 }
 
 /// Decodes a `file:` URI into a local path string. Decoding happens exactly once through Tauri's
@@ -78,7 +85,12 @@ fn local_file_path(uri: &str) -> Result<String, String> {
 }
 
 /// Runs off-main: decodes the link, then classifies the file by bounded content inspection.
-pub(super) fn validate(uri: &str, cwd: &str) -> Result<FileTarget, String> {
+pub(super) fn validate(
+    uri: &str,
+    cwd: &str,
+    markdown_view: bool,
+    roots: &[std::path::PathBuf],
+) -> Result<FileTarget, String> {
     let path = local_file_path(uri)?;
     let metadata =
         std::fs::metadata(&path).map_err(|error| format!("Cannot open {path}: {error}."))?;
@@ -116,6 +128,13 @@ pub(super) fn validate(uri: &str, cwd: &str) -> Result<FileTarget, String> {
             if std::fs::metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
                 return Err(format!("Cannot open {path}: not a regular file."));
             }
+            if markdown_view
+                && !launcher
+                && !initial_executable
+                && crate::documents::is_markdown(std::path::Path::new(&path))
+            {
+                return document_target(&path, roots);
+            }
             return Ok(uncertain_target(path));
         }
     };
@@ -129,6 +148,13 @@ pub(super) fn validate(uri: &str, cwd: &str) -> Result<FileTarget, String> {
     // Text scripts remain editor data even when executable. Recognized launchers
     // must never reach a default handler that could execute them on a simple click.
     Ok(match inspect_content(&mut file).unwrap_or(Content::Data) {
+        Content::Launchable => FileTarget::Reveal(path),
+        _ if markdown_view
+            && !launcher
+            && crate::documents::is_markdown(std::path::Path::new(&path)) =>
+        {
+            document_target(&path, roots)?
+        }
         Content::Text if !launcher => {
             if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("svg")) {
                 FileTarget::System(path)
@@ -136,13 +162,27 @@ pub(super) fn validate(uri: &str, cwd: &str) -> Result<FileTarget, String> {
                 FileTarget::Neovim(path)
             }
         }
-        Content::Launchable => FileTarget::Reveal(path),
         Content::Recognized if !launcher && !script && extension.is_some() => {
             FileTarget::System(path)
         }
         _ if executable || launcher || script => FileTarget::Reveal(path),
         _ => FileTarget::System(path),
     })
+}
+
+fn document_target(path: &str, roots: &[std::path::PathBuf]) -> Result<FileTarget, String> {
+    let (canonical, project) = match crate::documents::locate(std::path::Path::new(path), roots) {
+        Ok(location) => location,
+        Err(crate::documents::LocateError::OutsideRoots) => {
+            return Ok(FileTarget::Neovim(path.to_owned()))
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let loaded = crate::documents::open(&canonical, &project, false, crate::workspace::now())?;
+    Ok(FileTarget::Document(
+        Box::new(loaded),
+        project.to_string_lossy().into_owned(),
+    ))
 }
 
 fn inspect_content(reader: &mut impl Read) -> io::Result<Content> {

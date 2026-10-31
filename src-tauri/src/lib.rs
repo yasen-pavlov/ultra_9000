@@ -10,6 +10,7 @@ mod config;
 mod control;
 mod ctl;
 mod discovery;
+mod documents;
 mod instance;
 mod launch;
 mod lifecycle;
@@ -130,6 +131,16 @@ fn app() -> App {
             commands::item_restart,
             commands::item_select,
             commands::item_close,
+            commands::open_document,
+            commands::document_text,
+            commands::document_asset,
+            commands::document_reload,
+            commands::project_documents,
+            commands::document_preview,
+            commands::new_neovim_for_file,
+            commands::new_neovim_for_path,
+            commands::reveal_document,
+            commands::document_open_link,
             commands::notice_dismiss,
             commands::sheet_open,
             commands::sheet_close,

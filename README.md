@@ -22,7 +22,8 @@
 
 Ultra 9000 is a Tauri + Svelte desktop app that wraps **actual native Alacritty rendering and input** (no xterm.js, no browser terminal emulation) in a restrained project-centric interface. Agents, shells and Neovim run in app-owned PTYs, grouped by project in a sidebar.
 
-- **Projects → live items.** Every sidebar row is one live process: an agent (OMP, Claude Code, Codex, pi, or any tool configured in `[tools.*]`), a shell or Neovim, grouped by git project.
+- **Projects → live items.** Every sidebar row is one open item: a live process — an agent (OMP, Claude Code, Codex, pi, or any tool configured in `[tools.*]`), a shell or Neovim — or an open Markdown document, grouped by git project.
+- **Markdown reader.** Agent-written `.md` files open from terminal links, the palette's Documents section or `ultra9000 ctl open-document` in a reader that follows the file as it is written; raw HTML is never rendered.
 - **Native terminals.** Vendored Alacritty drawn as AppKit views on macOS and Wayland subsurfaces on Linux, above only the terminal rectangle.
 - **Resume saved conversations** from OMP, Claude Code, Codex and pi, discovered read-only from each tool's own session store.
 - **Agent status from the agent itself.** Working, needs you and your turn come from Ultra 9000's launch-scoped OMP extension, which reports OMP's own events over a local socket; status is never guessed from output.

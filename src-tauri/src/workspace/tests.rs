@@ -48,7 +48,7 @@ fn file_clicks_are_lossless_and_ordered_during_bell_overflow() {
 fn starting_selection_keeps_original_mru_after_background_completion() {
     let a = item("a");
     let mut b = item("b");
-    b.process = Process::Starting;
+    b.process = Some(Process::Starting);
     let mut recent = strings(&["a", "b"]);
     retain_recent(&mut recent, [&a, &b].into_iter());
     assert_eq!(recent, strings(&["a", "b"]));
@@ -56,7 +56,7 @@ fn starting_selection_keeps_original_mru_after_background_completion() {
         recent_running(&recent, [&a, &b].into_iter()),
         strings(&["a"])
     );
-    b.process = Process::Running;
+    b.process = Some(Process::Running);
     retain_recent(&mut recent, [&a, &b].into_iter());
     assert_eq!(
         recent_running(&recent, [&a, &b].into_iter()),
@@ -88,13 +88,13 @@ fn saved_running_binding_tracks_start_exit_and_unbind() {
         id: "saved".into(),
         path: "/saved".into(),
     });
-    i.process = Process::Starting;
+    i.process = Some(Process::Starting);
     assert!(running_binding(&i).is_some());
-    i.process = Process::Running;
+    i.process = Some(Process::Running);
     assert!(running_binding(&i).is_some());
-    i.process = Process::Exited;
+    i.process = Some(Process::Exited);
     assert!(running_binding(&i).is_none());
-    i.process = Process::Running;
+    i.process = Some(Process::Running);
     i.conversation = None;
     assert!(running_binding(&i).is_none());
 }
@@ -163,7 +163,7 @@ fn symlinked_store_resume_matches_discovery_running_item_id() {
             path: resumed.path.to_string_lossy().into_owned(),
         });
         for process in [Process::Starting, Process::Running] {
-            live.process = process;
+            live.process = Some(process);
             let running = find_bound_item(
                 [&live].into_iter(),
                 &discovered.tool,
@@ -230,11 +230,12 @@ fn item(id: &str) -> ItemState {
     ItemState {
         id: id.into(),
         tool: "omp".into(),
-        kind: ToolKind::Agent,
+        kind: crate::workspace::ItemKind::Agent,
         project_id: "/atlas".into(),
         cwd: "/atlas".into(),
         title: "OMP".into(),
-        process: Process::Running,
+        process: Some(Process::Running),
+        document: None,
         exit_code: None,
         failure: None,
         activity: Activity::Unknown,
@@ -318,7 +319,7 @@ fn close_confirmation_decision_table() {
         close_reason(&i, StatusSource::Process, &settings, false),
         Some(CloseReason::UnmonitoredAgent)
     );
-    i.kind = ToolKind::Terminal;
+    i.kind = crate::workspace::ItemKind::Terminal;
     i.tool = "shell".into();
     assert_eq!(
         close_reason(&i, StatusSource::Process, &settings, false),
@@ -339,7 +340,7 @@ fn close_confirmation_decision_table() {
         Some(CloseReason::Neovim)
     );
     for process in [Process::Starting, Process::Exited, Process::Failed] {
-        i.process = process;
+        i.process = Some(process);
         assert_eq!(
             close_reason(&i, StatusSource::Process, &settings, true),
             None
@@ -646,7 +647,7 @@ mod flows {
         let row = &s.items[0];
         assert_eq!(
             (row.process, row.kind, row.title.as_str(), row.cwd.as_str()),
-            (Process::Starting, ToolKind::Agent, "OMP", "/p/atlas")
+            (Some(Process::Starting), ItemKind::Agent, "OMP", "/p/atlas")
         );
         assert_eq!(s.active_item_id.as_deref(), Some("item-1"));
         assert!(
@@ -851,7 +852,7 @@ mod flows {
         assert_eq!(prepared.args, expected);
         host.complete(&editor);
         assert_eq!(active(), Some(editor.clone()));
-        assert_eq!(item(&source).process, Process::Running);
+        assert_eq!(item(&source).process, Some(Process::Running));
         assert_eq!(item(&source).activity, Activity::Working);
         assert_eq!(host.key(&source), Some(key));
         assert!(host.calls_of("stop").is_empty());
@@ -905,7 +906,7 @@ mod flows {
                     );
                     host.complete_system_file(Ok(()));
                 }
-                assert_eq!(item(&source).process, Process::Running);
+                assert_eq!(item(&source).process, Some(Process::Running));
                 assert_eq!(item(&source).activity, Activity::Working);
                 assert_eq!(host.key(&source), Some(key));
                 assert!(host.calls_of("stop").is_empty());
@@ -938,7 +939,7 @@ mod flows {
             assert_eq!(sheet(), before_sheet);
             assert_eq!(host.prepared.borrow().len(), 1);
             assert_eq!(host.key(&source), Some(key));
-            assert_eq!(item(&source).process, Process::Running);
+            assert_eq!(item(&source).process, Some(Process::Running));
             let notice = snap().notices.pop().unwrap();
             assert_eq!(notice.kind, "error");
             assert_eq!(notice.body, "desktop dispatch failed");
@@ -971,7 +972,7 @@ mod flows {
                 assert_eq!(notice.kind, "error");
                 assert!(!notice.body.is_empty());
             }
-            assert_eq!(item(&source).process, Process::Running);
+            assert_eq!(item(&source).process, Some(Process::Running));
             assert!(host.calls_of("stop").is_empty());
         }
     }
@@ -1127,7 +1128,7 @@ mod flows {
                     host.exit(key, Some(7));
                 }
                 host.complete_file();
-                assert_eq!(item(&source).process, Process::Exited);
+                assert_eq!(item(&source).process, Some(Process::Exited));
                 if route != "text" {
                     assert_eq!(ids(), vec![source.clone()]);
                     assert_eq!(active(), Some(source));
@@ -1147,7 +1148,7 @@ mod flows {
                     assert_eq!(item(&editor).tool, "neovim");
                     assert_eq!(item(&editor).cwd, item(&source).cwd);
                     host.complete(&editor);
-                    assert_eq!(item(&editor).process, Process::Running);
+                    assert_eq!(item(&editor).process, Some(Process::Running));
                     assert!(host.system_files.borrow().is_empty());
                     assert!(host.revealed_files.borrow().is_empty());
                 }
@@ -1163,12 +1164,12 @@ mod flows {
         deliver(key, embed::HostEvent::OpenFile(&uri));
         host.complete_file();
         let editor = active().unwrap();
-        assert_eq!(item(&editor).process, Process::Starting);
+        assert_eq!(item(&editor).process, Some(Process::Starting));
         close(&source, true).unwrap();
         host.exit(key, Some(0));
         host.complete(&editor);
         assert_eq!(ids(), vec![editor.clone()]);
-        assert_eq!(item(&editor).process, Process::Running);
+        assert_eq!(item(&editor).process, Some(Process::Running));
         assert_eq!(active(), Some(editor));
         assert!(snap().notices.is_empty());
     }
@@ -1185,7 +1186,7 @@ mod flows {
             &editor,
             "Neovim (nvim) was not found on your login shell's PATH.",
         );
-        assert_eq!(item(&editor).process, Process::Failed);
+        assert_eq!(item(&editor).process, Some(Process::Failed));
         assert_eq!(
             snap().notices.last().unwrap().body,
             item(&editor).failure.unwrap()
@@ -1199,7 +1200,7 @@ mod flows {
         assert_eq!(host.prepared.borrow().last().unwrap().args, prepared.args);
         assert_eq!(ids(), vec![source.clone(), restarted.clone()]);
         host.complete(&restarted);
-        assert_eq!(item(&source).process, Process::Running);
+        assert_eq!(item(&source).process, Some(Process::Running));
         assert_eq!(active(), Some(restarted));
         assert!(host.calls_of("stop").is_empty());
     }
@@ -1229,7 +1230,7 @@ mod flows {
         host.fail(&first, "omp: command not found");
         let again = resume(&c).unwrap();
         assert_ne!(again, first);
-        assert_eq!(item(&again).process, Process::Starting);
+        assert_eq!(item(&again).process, Some(Process::Starting));
     }
 
     #[test]
@@ -1239,7 +1240,7 @@ mod flows {
         let id = launch("omp", "/p/atlas");
         let key = host.complete(&id);
         let row = item(&id);
-        assert_eq!(row.process, Process::Running);
+        assert_eq!(row.process, Some(Process::Running));
         assert_eq!(row.pid, Some(1000 + key as u32));
         // OMP's terminal title is no status or title source.
         assert_eq!(row.activity, Activity::Unknown);
@@ -1248,7 +1249,7 @@ mod flows {
         // A late result for a row that is no longer starting changes nothing.
         let before = host.published.borrow().len();
         finish_launch(&id, Err("late".into()));
-        assert_eq!(item(&id).process, Process::Running);
+        assert_eq!(item(&id).process, Some(Process::Running));
         assert_eq!(host.published.borrow().len(), before);
         // Other tools show their terminal title.
         *host.initial_title.borrow_mut() = "htop".into();
@@ -1273,7 +1274,7 @@ mod flows {
             .iter()
             .map(|id| {
                 let row = item(id);
-                assert_eq!(row.process, Process::Failed);
+                assert_eq!(row.process, Some(Process::Failed));
                 row.failure.unwrap()
             })
             .collect();
@@ -1361,7 +1362,7 @@ mod flows {
         assert_eq!(ids().len(), 3);
         // An exited session is released before its replacement takes the slot.
         host.exit(kc, Some(2));
-        assert_eq!(item(&c).process, Process::Exited);
+        assert_eq!(item(&c).process, Some(Process::Exited));
         let e = begin_launch(
             "shell".into(),
             "/p".into(),
@@ -1583,7 +1584,7 @@ mod flows {
         let row = item(&id);
         assert_eq!(
             (row.process, row.exit_code, row.activity),
-            (Process::Exited, Some(1), Activity::Error)
+            (Some(Process::Exited), Some(1), Activity::Error)
         );
         assert_eq!(snap().recent_item_ids, vec![id.clone()]);
         assert!(snap().notices.is_empty());
@@ -1604,7 +1605,7 @@ mod flows {
         let row = item(&b);
         assert_eq!(
             (row.process, row.activity),
-            (Process::Exited, Activity::Unknown)
+            (Some(Process::Exited), Activity::Unknown)
         );
     }
 
@@ -1822,7 +1823,7 @@ mod flows {
         // An unclean exit keeps the row, but its token ends with the process.
         let (b, kb) = running(&host, "omp", "/p");
         host.exit(kb, Some(1));
-        assert_eq!(item(&b).process, Process::Exited);
+        assert_eq!(item(&b).process, Some(Process::Exited));
         // Messages that arrive after the exit change nothing.
         host.omp(&b, WORKING);
         assert_eq!(item(&b).activity, Activity::Error);
@@ -2184,6 +2185,7 @@ mod flows {
         sheet_open(OpenableSheet::Palette {
             project_id: Some("/p/x".into()),
             mode: PaletteMode::New,
+            focus: None,
         })
         .unwrap();
         assert_eq!(
@@ -2216,7 +2218,7 @@ mod flows {
         let ui = serde_json::to_value(quit_snapshot().unwrap()).unwrap();
         assert_eq!(
             ui["lastSet"],
-            json!([{"tool":"claude","title":"Saved s1","projectId":"/p","cwd":"/p",
+            json!([{"kind":"agent","path":null,"tool":"claude","title":"Saved s1","projectId":"/p","cwd":"/p",
                 "conversationId":"s1","conversationPath":"/store/claude/s1.jsonl"}])
         );
         assert_eq!(
@@ -2263,6 +2265,8 @@ mod flows {
             sidebar_expanded: false,
             folded_projects: vec![],
             last_set: vec![ui_state::LastSetEntry {
+                kind: ui_state::LastSetKind::Agent,
+                path: None,
                 tool: "omp".into(),
                 title: "Saved".into(),
                 project_id: "/p".into(),
@@ -2273,7 +2277,10 @@ mod flows {
         });
         let s = snap();
         assert!(!s.ui.sidebar_expanded && s.ui.folded_project_ids.is_empty());
-        assert_eq!(s.last_set.unwrap()[0].conversation.path, "/s1");
+        assert_eq!(
+            s.last_set.unwrap()[0].conversation.as_ref().unwrap().path,
+            "/s1"
+        );
     }
 
     #[test]
@@ -2640,5 +2647,171 @@ mod flows {
             .unwrap()
             .clone();
         assert!(palette["label"].is_string());
+    }
+}
+
+mod document_flows {
+    use super::*;
+    use crate::workspace::test_support::*;
+    use tempfile::TempDir;
+
+    fn open(dir: &TempDir, name: &str, select: bool) -> String {
+        let path = dir.path().join(name);
+        if !path.exists() {
+            std::fs::write(&path, "# Report\n").unwrap();
+        }
+        let (path, project) = documents::locate(&path, &[]).unwrap();
+        let loaded = documents::open(&path, &project, false, now()).unwrap();
+        open_document(loaded, project.to_string_lossy().into_owned(), select).unwrap()
+    }
+    fn launch(dir: &TempDir, tool: &str, anchor: Option<String>) -> String {
+        let root = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        begin_launch(tool.into(), root.clone(), root, None, anchor, None, None).unwrap()
+    }
+    #[test]
+    fn document_rows_dedupe_select_mru_hide_terminal_and_close_without_host_stop() {
+        let host = install();
+        let dir = TempDir::new().unwrap();
+        let shell = launch(&dir, "shell", None);
+        let key = host.complete(&shell);
+        let document = open(&dir, "a.md", false);
+        assert_eq!(
+            snapshot().unwrap().active_item_id.as_deref(),
+            Some(shell.as_str())
+        );
+        assert!(
+            host.calls_of("hide").is_empty(),
+            "background open must not steal focus"
+        );
+        let second = open(&dir, "b.md", true);
+        let state = snapshot().unwrap();
+        assert_eq!(state.view, "document");
+        assert_eq!(host.calls_of("hide"), [key]);
+        assert!(host.key(&second).is_none());
+        assert_eq!(state.items[1].process, None);
+        assert_eq!(state.items[1].kind, ItemKind::Document);
+        assert_eq!(state.items[1].tool, "document");
+        assert_eq!(state.items[1].activity, Activity::Unknown);
+        assert!(state.items[1].background_jobs.is_empty());
+        assert_eq!(open(&dir, "a.md", true), document);
+        assert_eq!(
+            snapshot().unwrap().recent_item_ids,
+            [document.clone(), second.clone(), shell.clone()]
+        );
+        let epoch = snapshot().unwrap().presentation_epoch;
+        assert!(!focus(&document, epoch, 1).unwrap());
+        sheet_open(OpenableSheet::Settings).unwrap();
+        assert_eq!(snapshot().unwrap().view, "sheet");
+        sheet_close().unwrap();
+        assert_eq!(snapshot().unwrap().view, "document");
+        assert_eq!(close(&document, false).unwrap(), "closed");
+        assert_eq!(snapshot().unwrap().active_item_id, Some(second.clone()));
+        assert!(!host.documents.borrow().contains_key(&document));
+        assert!(host.calls_of("stop").is_empty());
+        close(&second, false).unwrap();
+        assert_eq!(snapshot().unwrap().view, "terminal");
+        assert_eq!(snapshot().unwrap().active_item_id, Some(shell));
+        assert!(snapshot().unwrap().presentation_epoch > epoch);
+    }
+    #[test]
+    fn process_rows_stay_before_documents_and_editor_is_reused() {
+        let host = install();
+        let dir = TempDir::new().unwrap();
+        let a = open(&dir, "a.md", true);
+        let b = open(&dir, "b.md", true);
+        let agent = launch(&dir, "omp", None);
+        host.complete(&agent);
+        let shell = launch(&dir, "shell", Some(a.clone()));
+        host.complete(&shell);
+        let editor = new_neovim_for_file(&a).unwrap();
+        host.complete(&editor);
+        assert_eq!(new_neovim_for_file(&a).unwrap(), editor);
+        let state = snapshot().unwrap();
+        assert_eq!(
+            state.projects[0].item_ids,
+            [agent, shell, editor.clone(), a.clone(), b]
+        );
+        assert_eq!(
+            host.prepared.borrow().last().unwrap().args,
+            ["--".to_owned(), document_path(&a).unwrap()]
+        );
+        select(&a).unwrap();
+        dispatch(Action::NewNeovim).unwrap();
+        assert_eq!(snapshot().unwrap().active_item_id, Some(editor));
+        dispatch(Action::Documents).unwrap();
+        assert!(matches!(
+            snapshot().unwrap().sheet,
+            Some(Sheet::Palette {
+                focus: Some(PaletteFocus::Documents),
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn quit_lists_documents_but_status_and_process_shutdown_counts_do_not() {
+        let host = install();
+        let dir = TempDir::new().unwrap();
+        let document = open(&dir, "a.md", true);
+        let shell = launch(&dir, "shell", None);
+        host.complete(&shell);
+        open_quit().unwrap();
+        assert!(
+            matches!(snapshot().unwrap().sheet, Some(Sheet::Quit { item_ids }) if item_ids == [shell.clone(), document.clone()] || item_ids == [document.clone(), shell.clone()])
+        );
+        assert_eq!(live_items().unwrap().len(), 1);
+        let state = snapshot().unwrap();
+        let document_state = state.items.iter().find(|i| i.id == document).unwrap();
+        assert_eq!(
+            crate::status::item_status(document_state),
+            crate::status::ItemStatus::Document
+        );
+        let counts = crate::tray_model::TrayModel::build(&state, true, false).segments;
+        assert_eq!(counts.running, 1);
+        let saved = quit_snapshot().unwrap();
+        assert_eq!(saved.last_set.len(), 1);
+        assert_eq!(saved.last_set[0].kind, ui_state::LastSetKind::Document);
+        assert_eq!(
+            saved.last_set[0].path.as_deref(),
+            Some(document_path(&document).unwrap().as_str())
+        );
+        let wire = serde_json::to_value(snapshot().unwrap()).unwrap();
+        assert_eq!(wire["lastSet"][0]["kind"], "document");
+        assert_eq!(wire["lastSet"][0]["conversation"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn document_only_quit_needs_no_process_confirmation_and_skips_missing_last_set_entries() {
+        install();
+        let dir = TempDir::new().unwrap();
+        let kept = open(&dir, "kept.md", true);
+        let missing = open(&dir, "missing.md", true);
+        assert!(
+            live_items().unwrap().is_empty(),
+            "only live processes trigger the quit sheet"
+        );
+        std::fs::remove_file(dir.path().join("missing.md")).unwrap();
+        let mut document = snapshot()
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.id == missing)
+            .unwrap()
+            .document
+            .unwrap();
+        document.status = documents::DocumentStatus::Missing;
+        document.last_event = documents::DocumentEvent::Missing;
+        apply_document(&missing, document);
+        let saved = quit_snapshot().unwrap();
+        assert_eq!(saved.last_set.len(), 1);
+        assert_eq!(
+            saved.last_set[0].path.as_deref(),
+            Some(document_path(&kept).unwrap().as_str())
+        );
+        assert!(snapshot().unwrap().sheet.is_none());
     }
 }

@@ -3,7 +3,7 @@ use super::*;
 fn platform_defaults() {
     for p in [Platform::Linux, Platform::MacOs] {
         let m = Keymap::defaults(p);
-        assert_eq!(m.all().len(), 26);
+        assert_eq!(m.all().len(), 27);
         for (c, _) in &m.bindings {
             assert!(!never_captured(p, c));
         }
@@ -12,6 +12,17 @@ fn platform_defaults() {
     let m = Keymap::defaults(Platform::Linux);
     let c = parse_chord("Ctrl+PageUp").unwrap();
     assert_eq!(m.lookup(c.mods, c.key), Some(Action::ItemPrevious));
+    let documents = parse_chord("Ctrl+Shift+D").unwrap();
+    assert_eq!(
+        m.lookup(documents.mods, documents.key),
+        Some(Action::Documents)
+    );
+    let m = Keymap::defaults(Platform::MacOs);
+    let documents = parse_chord("Cmd+D").unwrap();
+    assert_eq!(
+        m.lookup(documents.mods, documents.key),
+        Some(Action::Documents)
+    );
 }
 #[test]
 fn physical_codes() {

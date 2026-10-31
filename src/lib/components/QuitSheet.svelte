@@ -1,9 +1,10 @@
 <script lang="ts">
   // Quit confirmation (board 15): lists everything that ends, folded groups included, with the
-  // consequence per kind. Default focus Cancel; "Hide instead" ends nothing.
+  // consequence per kind. Default focus Cancel; "Hide instead" ends nothing. Open documents are
+  // listed apart (board 30): they need no stopping and never raise the count.
   import { clock } from "../clock.svelte";
   import { run } from "../errors.svelte";
-  import { itemView } from "../items";
+  import { itemView, quitLists } from "../items";
   import { appHide, appQuit, sheetClose, type ItemState } from "../native";
   import { workspace } from "../workspace.svelte";
   import ToolTile from "./ToolTile.svelte";
@@ -12,20 +13,17 @@
 
   let cancel = $state<HTMLButtonElement | null>(null);
 
-  const items = $derived(
-    itemIds.flatMap((id) => {
-      const item = workspace.itemsById.get(id);
-      return item === undefined ? [] : [item];
-    }),
-  );
-  const count = $derived(itemIds.length);
+  const lists = $derived(quitLists(itemIds, workspace.state?.items ?? []));
+  const items = $derived(lists.ending);
+  const documents = $derived(lists.documents);
+  const count = $derived(items.length);
   const folded = $derived.by(() => {
     const foldedIds = new Set(workspace.state?.ui.foldedProjectIds ?? []);
     return workspace.groups
       .filter((group) => foldedIds.has(group.project.id))
       .map((group) => ({
         name: group.project.name,
-        count: group.items.filter((item) => itemIds.includes(item.id)).length,
+        count: group.items.filter((item) => item.kind !== "document" && itemIds.includes(item.id)).length,
       }))
       .filter((group) => group.count > 0);
   });
@@ -69,7 +67,9 @@
 
 <div class="sheet quit">
   <div class="card" role="alertdialog" aria-labelledby="quit-title" aria-describedby="quit-body">
-    <h2 id="quit-title">Quit Ultra 9000 and end {count} running {count === 1 ? "item" : "items"}?</h2>
+    <h2 id="quit-title">
+      {count === 0 ? "Quit Ultra 9000?" : `Quit Ultra 9000 and end ${count} running ${count === 1 ? "item" : "items"}?`}
+    </h2>
     <p id="quit-body">
       Every process started here ends now{#if folded.length > 0}, including {#each folded as group, index (index)}{index >
           0
@@ -79,7 +79,7 @@
             : ""}the {group.count} in folded <span class="strong">{group.name}</span>{/each}{/if}. Agent conversations
       stay saved and can be resumed after the next start. Shell and Neovim screens are not kept. This can't be undone.
     </p>
-    <div class="list scroll">
+    <div class="list scroll" hidden={items.length === 0}>
       {#each items as item (item.id)}
         {@const view = itemView(item, {
           tool: workspace.tool(item.tool),
@@ -99,6 +99,23 @@
         </div>
       {/each}
     </div>
+    {#if documents.length > 0}
+      <div class="sect">Open documents · nothing to stop</div>
+      <div class="list docs scroll">
+        {#each documents as item (item.id)}
+          <div class="pr">
+            <ToolTile tool={item.tool} />
+            <span class="tx"
+              ><span class="t"
+                >{item.title}{workspace.disambiguation.get(item.id) ?? ""}
+                <span class="dis">· {workspace.projectName(item.projectId)}</span></span
+              ></span
+            >
+            <span class="act">stays on disk</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
     <div class="acts">
       <button type="button" class="btn ghost" onclick={() => run("Hide", () => appHide())}
         >Hide instead{#if hideLabel !== null}<kbd>{hideLabel}</kbd>{/if}</button
@@ -112,7 +129,7 @@
         onclick={() => run("Cancel", () => sheetClose())}>Cancel<kbd>Esc</kbd></button
       >
       <button type="button" class="btn danger solid" onclick={() => run("Quit", () => appQuit())}
-        >Quit and end {count}</button
+        >{count === 0 ? "Quit" : `Quit and end ${count}`}</button
       >
     </div>
   </div>
@@ -140,6 +157,14 @@
   }
   .list .pr {
     min-height: 34px;
+  }
+  .list.docs {
+    max-height: 20vh;
+  }
+  .sect {
+    font-size: 11.5px;
+    color: var(--dim);
+    margin-bottom: -6px;
   }
   .act {
     color: var(--dim);

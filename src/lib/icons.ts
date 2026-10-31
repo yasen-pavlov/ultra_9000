@@ -38,18 +38,29 @@ const BUILTIN_MARK: Readonly<Record<string, string>> = {
 /** Marks with a brand-colour artwork (used only where colour is allowed: launch choices and pickers). */
 const COLOUR_MARKS: Readonly<Record<string, true>> = { "claude-code": true, neovim: true, pi: true };
 
+/** `ItemState.tool` of a document row (contract decision 2); not a configured tool, never looked up. */
+export const DOCUMENT_TOOL = "document";
+
 export type ToolMark =
   /** Validated user file: never inlined; mono is a CSS mask of the same URL. */
   | { kind: "user"; url: string; tint: "mono" | "original"; fill: boolean }
-  /** Bundled mono mark, inlined (currentColor); `generic` = the fallback agent mark, drawn neutral in pickers. */
-  | { kind: "svg"; svg: string; generic?: true }
+  /**
+   * Bundled mono mark, inlined (currentColor); `generic` = the fallback agent mark, drawn neutral in
+   * pickers; `neutral` = the document mark, drawn #b0bec5 wherever brand colour is not off (board 30).
+   */
+  | { kind: "svg"; svg: string; generic?: true; neutral?: true }
   /** Bundled colour artwork, shown as an image (keeps its own fills and gradient ids). */
   | { kind: "img"; url: string }
   /** Configured glyph letters in the UI font. */
   | { kind: "glyph"; text: string };
 
-/** Resolution order: valid user file → built-in mark by tool id → configured glyph → generic agent mark. */
+/**
+ * Resolution order: the document mark for document rows; otherwise valid user file → built-in mark
+ * by tool id → configured glyph → generic agent mark.
+ */
 export function toolMark(toolId: string, tool: ToolInfo | undefined, box: MarkBox, colour: boolean): ToolMark {
+  if (toolId === DOCUMENT_TOOL)
+    return { kind: "svg", svg: bundled(toolFiles, "tools", `document-${box}`), neutral: true };
   const icon = tool?.icon;
   if (icon) return { kind: "user", url: icon.url, tint: icon.tint, fill: icon.fill };
   const stem = own(BUILTIN_MARK, toolId);

@@ -56,7 +56,7 @@ Startup fails rather than starting an unprotected instance if the runtime direct
 
 ## Terminal file links
 
-Clicking a local `file://` link in the terminal, including OMP's file links, validates an existing regular file and inspects a bounded content prefix off the UI thread. The file follows one of three routes:
+Clicking a local `file://` link in the terminal, including OMP's file links, validates an existing regular file and inspects a bounded content prefix off the UI thread. Markdown follows the document setting below; other files follow one of three routes:
 
 - **Text/code → a new Neovim item**, selected immediately after the originating item in the same project, with that item's working folder (not the file's parent folder). This includes extensionless text, readable scripts even with executable permission, UTF-8 and BOM-marked UTF-16, and ANSI-coloured logs. `.svg` names instead use the system image handler; SVG-looking source/templates with other extensions remain text.
 - **Launchers/executables → reveal in the file manager, never execute.** Recognized executable content, launcher names (including symlink targets), non-text script payloads and otherwise unrecognized executable data are revealed rather than passed to a default handler. Recognized documents/media/archives with non-launcher, non-script extensions still use the system opener even if the filesystem marks them executable; extensionless executable data is revealed.
@@ -67,6 +67,24 @@ On Linux, reveal requests FileManager1 `ShowItems` to select the file. Only a mi
 The originating item keeps running; links in retained exited output also work. Missing files, directory links, special files, remote file hosts and malformed file URLs show an error instead of launching anything. Empty/`localhost` authorities and this machine's hostname identify local files. URL-encoded spaces, Unicode and reserved filename characters are decoded as literal path data. Line/column query parameters and fragments are not used for cursor positioning.
 
 Neovim uses the normal `[tools.neovim]` command and arguments and must be available on the login-shell PATH. Web links still use the system opener. Custom terminal hint commands and copy/select actions remain unchanged; this routing applies to the default `open` / `xdg-open` hint action with no configured arguments. No global OMP, Neovim or Alacritty settings are changed.
+
+## Documents
+
+Markdown (`.md` / `.markdown`, case-insensitive) opens in a live, read-only document surface by default. Each file has a row after its project's process rows; opening it again reuses that row (selection changes only when requested). Files are watched, atomic saves do not flash a missing state, and closing never asks or changes the file. Documents have no process status and never affect tray, menu-bar or shell-plugin counts. The Open palette lists recent project documents; **Documents in this project** focuses that section. `e` (or the New Neovim shortcut) opens the current file in Neovim, reusing an editor already started for it. With `projects.roots` configured, Markdown links outside those roots retain the Neovim route.
+
+```toml
+[file_links]
+markdown = "view" # "view" (default) or "neovim"; hot-reloaded
+```
+
+This setting is also available in Settings. Choose `neovim` to retain terminal links' editor route. The reader supports files up to 8 MiB; local images are bounded and confined to the document directory subtree. Remote images load automatically over HTTPS with no referrer. Open a file from a script without stealing selection:
+
+```sh
+ultra9000 ctl open-document ./docs/report.md
+ultra9000 ctl open-document ./docs/report.md --select --follow
+```
+
+The CLI prints the item ID. `--select` switches to it; `--follow` asks the reader to follow new content. `ultra9000 ctl open-document --help` explains the arguments without connecting to the app. Last-set resume reopens documents from disk alongside resumable agents.
 
 ## Keyboard shortcuts
 
@@ -85,6 +103,7 @@ new-neovim = "" # unbind
 | New agent here, project default tool (`new-agent`) | Ctrl+Shift+N | Cmd+N |
 | New terminal below the active item (`new-terminal`) | Ctrl+Shift+T | Cmd+T |
 | New Neovim here (`new-neovim`) | Ctrl+Shift+E | Cmd+E |
+| Documents in this project (`documents`) | Ctrl+Shift+D | Cmd+D |
 | Close item, again to confirm (`close`) | Ctrl+Shift+W | Cmd+W |
 | Jump to what's waiting: needs-you first, then unread your-turn (`jump-waiting`) | Ctrl+Shift+J | Cmd+J |
 | Item 1…9 in visible order (`item-1` … `item-9`) | Ctrl+Shift+1…9 | Cmd+1…9 |

@@ -1,5 +1,6 @@
 // Mirrors the native WorkspaceState. Native owns items, projects, selection, sheets and order; this
 // store only observes snapshots (strictly newer revisions) and derives presentation from them.
+import { clock } from "./clock.svelte";
 import { basename, clockTime } from "./format";
 import {
   errorMessage,
@@ -101,6 +102,7 @@ class WorkspaceStore {
   );
 
   #disconnect: (() => void) | null = null;
+  #liveTimer: number | undefined;
 
   /** Platform label of an app shortcut ("Ctrl+Shift+Space"), or null when unbound. */
   shortcut(action: ShortcutAction): string | null {
@@ -130,6 +132,27 @@ class WorkspaceStore {
     this.error = null;
     const active = next.activeItemId === null ? undefined : next.items.find((item) => item.id === next.activeItemId);
     if (active !== undefined) this.lastProjectId = active.projectId;
+    this.#scheduleLiveEnd(next);
+  }
+
+  /**
+   * A document row reads “live” until `liveUntilMs` (board 30). The coarse clock would leave it up
+   * to a tick late, so the clock is refreshed at the earliest pending end.
+   */
+  #scheduleLiveEnd(state: WorkspaceState): void {
+    clearTimeout(this.#liveTimer);
+    const now = Date.now();
+    const ends = state.items.flatMap((item) =>
+      item.document !== null && item.document.liveUntilMs > now ? [item.document.liveUntilMs] : [],
+    );
+    if (ends.length === 0) return;
+    this.#liveTimer = window.setTimeout(
+      () => {
+        clock.now = Date.now();
+        if (this.state !== null) this.#scheduleLiveEnd(this.state);
+      },
+      Math.min(...ends) - now + 20,
+    );
   }
 
   /** Subscribe first, then fetch, so no transition between the two is lost. Returns cleanup. */

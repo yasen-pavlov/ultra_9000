@@ -203,6 +203,7 @@
         break;
       }
       case "Escape":
+        // Back to the selected surface: the terminal, or the document/sheet in the web view.
         entry.blur();
         if (workspace.terminalVisible) requestTerminalFocus();
         else document.querySelector<HTMLElement>("[data-sheet-autofocus]")?.focus();
@@ -358,8 +359,9 @@
                 data-item-id={item.id}
                 data-need={item.activity === "needs-you" ? "" : undefined}
                 tabindex={tabStop === `ic:${item.id}` ? 0 : -1}
-                aria-label="{view.title}{workspace.disambiguation.get(item.id) ?? ''}, {group.project
-                  .name}, {workspace.toolLabel(item.tool)}, {view.stateText}"
+                aria-label={view.doc !== null
+                  ? `${view.title}${workspace.disambiguation.get(item.id) ?? ""}, document`
+                  : `${view.title}${workspace.disambiguation.get(item.id) ?? ""}, ${group.project.name}, ${workspace.toolLabel(item.tool)}, ${view.stateText}`}
                 aria-current={item.id === activeId ? "true" : undefined}
                 onclick={() => select(item)}
                 onmouseenter={() => onpeek(item.id)}

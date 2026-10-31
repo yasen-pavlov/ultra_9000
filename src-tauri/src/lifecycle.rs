@@ -282,6 +282,7 @@ pub fn handle_tray_action<R: Runtime>(app: &AppHandle<R>, action: TrayAction) {
                 workspace::sheet_open(workspace::OpenableSheet::Palette {
                     project_id: None,
                     mode: workspace::PaletteMode::Open,
+                    focus: None,
                 })
             }),
             TrayAction::ToggleNotify => {
@@ -465,8 +466,8 @@ pub fn request_quit<R: Runtime>(app: &AppHandle<R>) {
     }
     let app = app.clone();
     platform::defer_on_main(Box::new(move || {
-        let result = workspace::live_items().and_then(|live| {
-            if live.is_empty() {
+        let result = workspace::live_items().and_then(|items| {
+            if items.is_empty() {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = crate::commands::app_quit(app).await {

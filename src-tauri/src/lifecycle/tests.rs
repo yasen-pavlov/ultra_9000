@@ -109,7 +109,8 @@ fn tray_actions_run_later_on_the_main_thread() {
         sheet(),
         Some(Sheet::Palette {
             project_id: None,
-            mode: PaletteMode::Open
+            mode: PaletteMode::Open,
+            ..
         })
     ));
     assert!(sent(&mut tray).unwrap().visible);

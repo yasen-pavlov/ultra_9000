@@ -1021,7 +1021,7 @@ mod commands {
         .unwrap();
         assert!(matches!(
             &f.state().sheet,
-            Some(Sheet::Palette { project_id: Some(p), mode: PaletteMode::New }) if *p == project
+            Some(Sheet::Palette { project_id: Some(p), mode: PaletteMode::New, .. }) if *p == project
         ));
         assert!(lifecycle::window_visible());
         f.run(Command::RequestQuit {}).unwrap();
@@ -1032,5 +1032,64 @@ mod commands {
             &f.state().sheet,
             Some(Sheet::Quit { item_ids }) if *item_ids == [shell.clone()]
         ));
+    }
+
+    #[test]
+    fn open_document_defaults_to_background_and_stays_out_of_control_snapshot() {
+        let f = setup();
+        let project = f.project("atlas");
+        let (shell, _) = f.running("shell", &project);
+        let path = Path::new(&project).join("report.md");
+        fs::write(&path, "# Report\n").unwrap();
+        let document = f
+            .run(Command::OpenDocument {
+                path: path.to_string_lossy().into_owned(),
+                select: false,
+                follow: true,
+            })
+            .unwrap()["itemId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(f.state().active_item_id.as_deref(), Some(shell.as_str()));
+        assert!(
+            f.state()
+                .items
+                .iter()
+                .find(|i| i.id == document)
+                .unwrap()
+                .document
+                .as_ref()
+                .unwrap()
+                .follow
+        );
+        let projected = projected(&context());
+        assert_eq!(items(&projected).len(), 1);
+        assert_eq!(projected["projects"][0]["itemIds"], json!([shell]));
+        let selected = f
+            .run(Command::OpenDocument {
+                path: path.to_string_lossy().into_owned(),
+                select: true,
+                follow: false,
+            })
+            .unwrap();
+        assert_eq!(selected["itemId"], document);
+        assert_eq!(f.state().active_item_id, Some(document));
+        assert_eq!(f.state().view, "document");
+    }
+
+    #[test]
+    fn open_document_rejects_relative_wire_paths_without_mutation() {
+        let f = setup();
+        let failure = f
+            .run(Command::OpenDocument {
+                path: "report.md".into(),
+                select: true,
+                follow: false,
+            })
+            .unwrap_err();
+        assert_eq!(failure.error, "invalid_args");
+        assert!(failure.message.contains("absolute"));
+        assert!(f.state().items.is_empty());
     }
 }

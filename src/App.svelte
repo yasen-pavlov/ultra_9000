@@ -1,11 +1,13 @@
 <script lang="ts">
   // Window layout: sidebar | (context bar) + content panel. The panel shows exactly one thing: the
-  // selected item's native terminal (with an exit bar when it ended), a launch attempt, a sheet
-  // (palette, settings, shortcuts, close confirmation, quit) that replaces the terminal, or the
-  // cold-start launcher. Native owns all state; this only renders snapshots and issues commands.
+  // selected item's surface (its native terminal, with an exit bar when it ended, or a document
+  // rendered here), a launch attempt, a sheet (palette, settings, shortcuts, close confirmation,
+  // quit) that replaces it, or the cold-start launcher. Native owns all state; this only renders
+  // snapshots and issues commands.
   import { clock } from "./lib/clock.svelte";
   import ConfirmClose from "./lib/components/ConfirmClose.svelte";
   import ContextBar from "./lib/components/ContextBar.svelte";
+  import DocumentSurface from "./lib/components/DocumentSurface.svelte";
   import ExitBar from "./lib/components/ExitBar.svelte";
   import LaunchAttempt from "./lib/components/LaunchAttempt.svelte";
   import Palette from "./lib/components/Palette.svelte";
@@ -14,6 +16,7 @@
   import ShortcutsSheet from "./lib/components/ShortcutsSheet.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TerminalHost from "./lib/components/TerminalHost.svelte";
+  import { documentSessions } from "./lib/document/session.svelte";
   import { run, uiErrors } from "./lib/errors.svelte";
   import { errorMessage, listenUiCommand, listenWindowFocus, uiSet, type UnlistenFn } from "./lib/native";
   import { settings } from "./lib/settings.svelte";
@@ -57,13 +60,16 @@
     };
   }
 
-  // Hiding/minimizing drops queued focus; the window becoming key again restores terminal focus
-  // from the current geometry, unless the user had moved keyboard focus into the sidebar.
+  // Hiding/minimizing drops queued focus; the window becoming key again restores focus to the
+  // selected surface (terminal or document), unless the user had moved keyboard focus into the sidebar.
   $effect(() =>
     subscribe("window focus", () =>
       listenWindowFocus((focused) => {
         if (!focused) cancelTerminalFocus();
-        else if (document.activeElement?.closest("[data-sidebar]") == null) requestTerminalFocus();
+        else if (document.activeElement?.closest("[data-sidebar]") != null) return;
+        else if (workspace.state?.view === "document") {
+          document.querySelector<HTMLElement>("[data-sheet-autofocus]")?.focus({ preventScroll: true });
+        } else requestTerminalFocus();
       }),
     ),
   );
@@ -80,6 +86,17 @@
   const snapshot = $derived(workspace.state);
   const sheet = $derived(snapshot?.sheet ?? null);
   const active = $derived(workspace.active);
+  /** The active document while the panel shows it (view "document"). */
+  const activeDocument = $derived(
+    snapshot?.view === "document" && active?.document != null ? { item: active, doc: active.document } : null,
+  );
+
+  // Reader memory (place, follow, find) lives as long as the document's row.
+  $effect(() => {
+    documentSessions.retain(
+      new Set((snapshot?.items ?? []).filter((item) => item.kind === "document").map((item) => item.id)),
+    );
+  });
   const preferExpanded = $derived(snapshot?.ui.sidebarExpanded ?? true);
   const narrow = $derived(windowWidth < settings.autoCollapseBelow);
   const expanded = $derived(preferExpanded && (!narrow || expandedWhileNarrow));
@@ -118,7 +135,8 @@
       case "quit":
         return "Quit confirmation";
       default:
-        return active === null ? "Start or resume" : `Terminal: ${active.title}`;
+        if (active === null) return "Start or resume";
+        return active.kind === "document" ? `Document: ${active.title}` : `Terminal: ${active.title}`;
     }
   });
 </script>
@@ -153,8 +171,8 @@
         </div>
       {:else if sheet !== null}
         {#if sheet.kind === "palette"}
-          {#key `${snapshot.presentationEpoch}|${sheet.projectId ?? ""}|${sheet.mode}`}
-            <Palette variant="sheet" initialScope={sheet.projectId} mode={sheet.mode} />
+          {#key `${snapshot.presentationEpoch}|${sheet.projectId ?? ""}|${sheet.mode}|${sheet.focus ?? ""}`}
+            <Palette variant="sheet" initialScope={sheet.projectId} mode={sheet.mode} focus={sheet.focus} />
           {/key}
         {:else if sheet.kind === "settings"}
           <SettingsSheet sidebarExpanded={preferExpanded} />
@@ -170,6 +188,15 @@
       {:else if active === null}
         {#key workspace.lastProjectId}
           <Palette variant="launcher" initialScope={workspace.lastProjectId} mode="open" />
+        {/key}
+      {:else if activeDocument !== null}
+        {#key activeDocument.item.id}
+          <DocumentSurface
+            itemId={activeDocument.item.id}
+            title={activeDocument.item.title}
+            doc={activeDocument.doc}
+            presentationEpoch={snapshot.presentationEpoch}
+          />
         {/key}
       {:else if active.process === "starting" || active.process === "failed"}
         <LaunchAttempt item={active} />

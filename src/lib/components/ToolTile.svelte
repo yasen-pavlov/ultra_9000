@@ -41,9 +41,18 @@
         : colour === "picker" && settings.brandColour === "pickers"),
   );
   const mark = $derived(toolMark(tool, info, box, coloured));
-  /** Mark colour: the tool's accent, or neutral grey for the generic agent mark (board 24); null = default. */
+  /**
+   * Mark colour: the tool's accent, or neutral grey for the generic agent mark (board 24) and the
+   * document mark (board 30, every brand-colour mode except "off"); null = default.
+   */
   const markColour = $derived(
-    coloured ? (info?.accent ?? (mark.kind === "svg" && mark.generic === true ? "#b0bec5" : null)) : null,
+    mark.kind === "svg" && mark.neutral === true
+      ? settings.brandColour === "off"
+        ? null
+        : "#b0bec5"
+      : coloured
+        ? (info?.accent ?? (mark.kind === "svg" && mark.generic === true ? "#b0bec5" : null))
+        : null,
   );
   /** icon_fill: the square logo is the tile surface (bare marks have no tile, so they contain it). Independent of the tint. */
   const fill = $derived(mark.kind === "user" && mark.fill && size !== 16);

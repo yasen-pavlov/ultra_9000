@@ -236,6 +236,26 @@
           </span>
         {/snippet}
       </SettingRow>
+      <SettingRow
+        key="file_links.markdown"
+        name="Markdown links open in"
+        description="Clicking a .md or .markdown link in a terminal. Reader shows it as a document row; Neovim edits it in a new Neovim item."
+        timing="live"
+      >
+        {#snippet control(entry, write, pending)}
+          <span class="seg">
+            <button type="button" class:on={entry?.value !== "neovim"} disabled={pending} onclick={() => write("view")}
+              >Reader</button
+            >
+            <button
+              type="button"
+              class:on={entry?.value === "neovim"}
+              disabled={pending}
+              onclick={() => write("neovim")}>Neovim</button
+            >
+          </span>
+        {/snippet}
+      </SettingRow>
 
       <div class="sec">Sidebar</div>
       <SettingRow
