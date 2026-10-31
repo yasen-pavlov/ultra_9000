@@ -471,6 +471,192 @@ fn reveal_creates_the_config_dir_before_opening_it() {
     assert!(reveal(&file.join("config"), "true").is_err());
 }
 
+fn fake_opener(f: &Fixture, name: &str, status: u8) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let opener = f.root.join(name);
+    fs::write(
+        &opener,
+        format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$0.argv\"\nexit {status}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&opener, fs::Permissions::from_mode(0o700)).unwrap();
+    (opener, f.root.join(format!("{name}.argv")))
+}
+
+#[test]
+fn file_opener_preserves_literal_argv_and_reports_spawn_and_nonzero_exit_failures() {
+    let f = Fixture::new();
+    let file = f.root.join("-literal ;$(touch injected) 雪#.zip");
+    fs::write(&file, "").unwrap();
+    let (opener, record) = fake_opener(&f, "opener", 0);
+    // The same argv helper is used by macOS open -R; never call a desktop opener here.
+    for args in [&[][..], &["-R"][..]] {
+        open_file_with(&file, opener.to_str().unwrap(), args).unwrap();
+        let expected = args
+            .iter()
+            .copied()
+            .chain(std::iter::once(file.to_str().unwrap()))
+            .flat_map(|arg| arg.as_bytes().iter().copied().chain(std::iter::once(0)))
+            .collect::<Vec<_>>();
+        assert_eq!(fs::read(&record).unwrap(), expected);
+    }
+    assert!(!f.root.join("injected").exists());
+    let (failing, _) = fake_opener(&f, "failing-opener", 17);
+    let error = open_file_with(&file, failing.to_str().unwrap(), &[]).unwrap_err();
+    assert!(error.contains("17"), "{error}");
+    assert!(error.contains(file.to_str().unwrap()), "{error}");
+    assert!(open_file_with(&file, "/u9k/missing-opener", &[])
+        .unwrap_err()
+        .contains("/u9k/missing-opener"));
+}
+
+#[cfg(target_os = "linux")]
+mod file_reveal {
+    use super::*;
+    use crate::test_support::PrivateBus;
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use zbus::blocking::connection::Builder;
+
+    struct FileManager {
+        calls: mpsc::Sender<(Vec<String>, String)>,
+        response: Arc<AtomicUsize>,
+    }
+    #[zbus::interface(name = "org.freedesktop.FileManager1")]
+    impl FileManager {
+        fn show_items(&self, uris: Vec<String>, startup_id: &str) -> zbus::fdo::Result<()> {
+            self.calls.send((uris, startup_id.into())).unwrap();
+            let error = match self.response.load(Ordering::Relaxed) {
+                0 => return Ok(()),
+                1 => zbus::fdo::Error::UnknownMethod("unsupported ShowItems".into()),
+                2 => zbus::fdo::Error::NameHasNoOwner("unowned manager".into()),
+                3 => zbus::fdo::Error::ServiceUnknown("missing manager".into()),
+                4 => zbus::fdo::Error::Failed("private reveal failure".into()),
+                5 => zbus::fdo::Error::TimedOut("private reveal timeout".into()),
+                _ => zbus::fdo::Error::AccessDenied("private reveal denied".into()),
+            };
+            Err(error)
+        }
+    }
+
+    #[test]
+    fn show_items_encodes_selection_and_only_unavailable_services_fall_back_to_parent() {
+        let Some(private) = PrivateBus::start() else {
+            return;
+        };
+        let f = Fixture::new();
+        let parent = f.root.join("containing folder");
+        fs::create_dir(&parent).unwrap();
+        let file = parent.join("launcher 雪%#?.JAR");
+        fs::write(&file, "never execute this file").unwrap();
+        let (calls, received) = mpsc::channel();
+        let response = Arc::new(AtomicUsize::new(0));
+        let server = Builder::address(private.address.as_str())
+            .unwrap()
+            .name("org.freedesktop.FileManager1")
+            .unwrap()
+            .serve_at(
+                "/org/freedesktop/FileManager1",
+                FileManager {
+                    calls,
+                    response: response.clone(),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let (opener, record) = fake_opener(&f, "parent-opener", 0);
+        reveal_file_with(
+            &file,
+            Builder::address(private.address.as_str()),
+            opener.to_str().unwrap(),
+        )
+        .unwrap();
+        let (uris, startup_id) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            uris,
+            vec![tauri::Url::from_file_path(&file).unwrap().to_string()]
+        );
+        assert!(startup_id.is_empty());
+        assert!(
+            !record.exists(),
+            "successful selection must not spawn an opener"
+        );
+
+        for mode in 1..=3 {
+            let _ = fs::remove_file(&record);
+            response.store(mode, Ordering::Relaxed);
+            reveal_file_with(
+                &file,
+                Builder::address(private.address.as_str()),
+                opener.to_str().unwrap(),
+            )
+            .unwrap();
+            received.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(
+                fs::read(&record).unwrap(),
+                [parent.to_str().unwrap().as_bytes(), b"\0"].concat()
+            );
+        }
+        let (unused, unused_record) = fake_opener(&f, "must-not-open", 0);
+        for (mode, message) in [(4, "failure"), (5, "timeout"), (6, "denied")] {
+            response.store(mode, Ordering::Relaxed);
+            let error = reveal_file_with(
+                &file,
+                Builder::address(private.address.as_str()),
+                unused.to_str().unwrap(),
+            )
+            .unwrap_err();
+            assert!(error.contains(message), "{error}");
+            received.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(!unused_record.exists(), "{error}");
+        }
+        let error = reveal_file_with(
+            &file,
+            Err(zbus::Error::InputOutput(Arc::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "private connection timeout",
+            )))),
+            unused.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.contains("private connection timeout"), "{error}");
+        assert!(!unused_record.exists());
+
+        // A genuinely unowned name on the private bus also takes the directory-only fallback.
+        drop(server);
+        fs::remove_file(&record).unwrap();
+        reveal_file_with(
+            &file,
+            Builder::address(private.address.as_str()),
+            opener.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&record).unwrap(),
+            [parent.to_str().unwrap().as_bytes(), b"\0"].concat()
+        );
+        let (failing_opener, failed_record) = fake_opener(&f, "failing-parent-opener", 19);
+        for failing in ["/u9k/missing-opener", failing_opener.to_str().unwrap()] {
+            let error =
+                reveal_file_with(&file, Builder::address(private.address.as_str()), failing)
+                    .unwrap_err();
+            assert!(error.contains(file.to_str().unwrap()), "{error}");
+            assert!(error.contains(failing), "{error}");
+        }
+        assert_eq!(
+            fs::read(failed_record).unwrap(),
+            [parent.to_str().unwrap().as_bytes(), b"\0"].concat()
+        );
+    }
+}
+
 #[test]
 fn invalid_terminal_config_keeps_the_last_good_terminal_and_reports() {
     let f = Fixture::new();
