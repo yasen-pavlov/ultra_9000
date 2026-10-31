@@ -128,9 +128,12 @@ describe("renderMermaid on a real diagram", () => {
     expect(svg).not.toContain("foreignObject");
   });
 
-  it("anchors node labels in the middle and colours class relation ends with the app's sheet", async () => {
+  it("centres flowchart and state node labels only, and colours class relation ends, with the app's sheet", async () => {
     const flow = await renderMermaid("flowchart TD\n A[Important]-->B[Result]");
-    const classes = await renderMermaid("classDiagram\n Animal <|-- Duck\n Car *-- Wheel");
+    const state = await renderMermaid("stateDiagram-v2\n Idle --> Busy");
+    const classes = await renderMermaid(
+      "classDiagram\n class Store {\n  +load()\n  -cache\n }\n Animal <|-- Duck\n Car *-- Wheel",
+    );
     // jsdom has no SVG presentation cascade (nor these SVG properties): read the sheet's rules
     // from its text and check which of them match.
     const diagramCss = readFileSync("src/lib/document/mermaid.css", "utf8");
@@ -142,12 +145,21 @@ describe("renderMermaid on a real diagram", () => {
       rules.some((rule) => rule.body.includes(`${property}: ${value};`) && element.matches(rule.selector));
     const article = document.createElement("article");
     article.className = "prose";
-    article.innerHTML = `<div class="diagram">${"svg" in flow ? flow.svg : ""}</div><div class="diagram">${"svg" in classes ? classes.svg : ""}</div>`;
+    article.innerHTML = [flow, state, classes]
+      .map((result) => `<div class="diagram">${"svg" in result ? result.svg : ""}</div>`)
+      .join("");
     document.body.append(article);
-    const labels = [...article.querySelectorAll(".diagram:first-child .node .label text")];
-    expect(labels.map((text) => text.textContent)).toEqual(["Important", "Result"]);
-    for (const text of labels) expect(ruled(text, "text-anchor", "middle")).toBe(true);
-    const markers = [...article.querySelectorAll(".diagram:last-child marker.marker")];
+    const [flowBox, stateBox, classBox] = [...article.querySelectorAll(".diagram")];
+    const flowLabels = [...flowBox.querySelectorAll(".node .label text")];
+    expect(flowLabels.map((text) => text.textContent)).toEqual(["Important", "Result"]);
+    const stateLabels = [...stateBox.querySelectorAll(".node .label text")];
+    expect(stateLabels.map((text) => text.textContent)).toEqual(expect.arrayContaining(["Idle", "Busy"]));
+    for (const text of [...flowLabels, ...stateLabels]) expect(ruled(text, "text-anchor", "middle")).toBe(true);
+    // Class titles and members are placed for a start anchor by Mermaid: never re-anchored.
+    const classTexts = [...classBox.querySelectorAll("text")];
+    expect(classTexts.map((text) => text.textContent)).toEqual(expect.arrayContaining(["Store", "+load()", "-cache"]));
+    for (const text of classTexts) expect(ruled(text, "text-anchor", "middle")).toBe(false);
+    const markers = [...classBox.querySelectorAll("marker.marker")];
     expect(markers.length).toBeGreaterThan(0);
     for (const marker of markers) expect(ruled(marker, "fill", "var(--dim)")).toBe(true);
     article.remove();

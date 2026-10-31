@@ -30,15 +30,18 @@
 .prose .diagram .label text {
   fill: var(--hi);
 }
-/* Anchoring Mermaid's own sheet provided: node labels (flowchart, state, class) sit at the node's
-   centre (x = 0), so their text is anchored in the middle. Edge labels carry an inline
-   text-anchor and cluster titles are placed by their left edge, as in Mermaid's sheet. */
-.prose .diagram .node .label text,
+/* Anchoring Mermaid's own sheet provided, scoped to the diagrams that need it: flowchart and
+   state node labels sit at the node's centre (x = 0), so their text is anchored in the middle.
+   Class-diagram titles and members are placed for a start anchor and keep it; edge labels carry
+   an inline text-anchor; cluster titles are placed by their left edge. */
+.prose .diagram svg.flowchart .node .label text,
+.prose .diagram svg.statediagram .node .label text,
 .prose .diagram .rough-node .label text,
 .prose .diagram .flowchartTitleText {
   text-anchor: middle;
 }
-.prose .diagram .node .label,
+.prose .diagram svg.flowchart .node .label,
+.prose .diagram svg.statediagram .node .label,
 .prose .diagram .rough-node .label {
   text-align: center;
 }
