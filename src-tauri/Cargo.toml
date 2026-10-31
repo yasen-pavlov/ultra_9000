@@ -33,7 +33,7 @@ harness = false
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-tauri = { version = "=2.12.2", features = ["image-png"] }
+tauri = { version = "=2.12.5", features = ["image-png"] }
 serde = { version = "1", features = ["derive", "rc"] }
 log = { version = "0.4", features = ["std"] }
 libc = "0.2"
@@ -54,7 +54,7 @@ infer = "0.22"
 alacritty_embed = { path = "../vendor/alacritty" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-tauri = { version = "=2.12.2", features = ["tray-icon"] }
+tauri = { version = "=2.12.5", features = ["tray-icon"] }
 # The objc2 0.6 generation that tao/wry use. The vendored terminal keeps objc2 0.5 for its
 # winit-derived view; the embed API takes raw AppKit object pointers, not objc2 types.
 objc2 = "0.6.4"
