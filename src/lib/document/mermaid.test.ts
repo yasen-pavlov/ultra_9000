@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MERMAID_SECURE_KEYS, cleanMermaidSvg, mermaidReason, refusedMermaid, renderMermaid } from "./mermaid";
+// Vitest stubs style sheets (even ?raw), so the test reads the shipped file itself; tests run
+// from the repository root.
+import { readFileSync } from "node:fs";
 
 describe("Mermaid sources that reach beyond shapes and text are refused before rendering", () => {
   it("refuses extended node metadata whatever its spelling (Mermaid decodes it as YAML and preloads images)", () => {
@@ -123,6 +126,31 @@ describe("renderMermaid on a real diagram", () => {
     expect(svg).not.toContain("@keyframes");
     expect(svg).not.toMatch(/url\((?!#)/);
     expect(svg).not.toContain("foreignObject");
+  });
+
+  it("anchors node labels in the middle and colours class relation ends with the app's sheet", async () => {
+    const flow = await renderMermaid("flowchart TD\n A[Important]-->B[Result]");
+    const classes = await renderMermaid("classDiagram\n Animal <|-- Duck\n Car *-- Wheel");
+    // jsdom has no SVG presentation cascade (nor these SVG properties): read the sheet's rules
+    // from its text and check which of them match.
+    const diagramCss = readFileSync("src/lib/document/mermaid.css", "utf8");
+    const rules = [...diagramCss.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^}]*)\}/g)].map((match) => ({
+      selector: match[1].trim(),
+      body: match[2],
+    }));
+    const ruled = (element: Element, property: string, value: string): boolean =>
+      rules.some((rule) => rule.body.includes(`${property}: ${value};`) && element.matches(rule.selector));
+    const article = document.createElement("article");
+    article.className = "prose";
+    article.innerHTML = `<div class="diagram">${"svg" in flow ? flow.svg : ""}</div><div class="diagram">${"svg" in classes ? classes.svg : ""}</div>`;
+    document.body.append(article);
+    const labels = [...article.querySelectorAll(".diagram:first-child .node .label text")];
+    expect(labels.map((text) => text.textContent)).toEqual(["Important", "Result"]);
+    for (const text of labels) expect(ruled(text, "text-anchor", "middle")).toBe(true);
+    const markers = [...article.querySelectorAll(".diagram:last-child marker.marker")];
+    expect(markers.length).toBeGreaterThan(0);
+    for (const marker of markers) expect(ruled(marker, "fill", "var(--dim)")).toBe(true);
+    article.remove();
   });
 
   it("renders bidirectional arrows and class stereotypes", async () => {

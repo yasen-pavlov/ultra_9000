@@ -30,6 +30,23 @@
 .prose .diagram .label text {
   fill: var(--hi);
 }
+/* Anchoring Mermaid's own sheet provided: node labels (flowchart, state, class) sit at the node's
+   centre (x = 0), so their text is anchored in the middle. Edge labels carry an inline
+   text-anchor and cluster titles are placed by their left edge, as in Mermaid's sheet. */
+.prose .diagram .node .label text,
+.prose .diagram .rough-node .label text,
+.prose .diagram .flowchartTitleText {
+  text-anchor: middle;
+}
+.prose .diagram .node .label,
+.prose .diagram .rough-node .label {
+  text-align: center;
+}
+.prose .diagram .edgeLabel rect.background,
+.prose .diagram .cluster-label rect.background {
+  fill: var(--panel);
+  stroke: none;
+}
 .prose .diagram .cluster rect {
   fill: var(--well);
   stroke: var(--line);
@@ -213,4 +230,13 @@
 }
 .prose .diagram .today {
   stroke: var(--purple);
+}
+
+/* Class-diagram relation ends (inheritance, composition, aggregation, dependency, lollipop): the
+   edge colour, set on the marker element so its path inherits it (Mermaid draws these paths with
+   an inline zero stroke, so a hollow fill would leave them invisible). */
+.prose .diagram .marker,
+.prose .diagram marker {
+  fill: var(--dim);
+  stroke: var(--dim);
 }

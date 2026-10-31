@@ -138,7 +138,9 @@
     {#if active !== null && activeView !== null}
       <ToolTile tool={active.tool} size={16} />
       <b class="txt">{workspace.projectName(active.projectId)}</b><span class="txt sep">/</span>
-      <b class="txt title">{activeView.title}{workspace.disambiguation.get(active.id) ?? ""}</b>
+      <b class="txt title" class:docname={activeView.doc !== null}
+        >{activeView.title}{workspace.disambiguation.get(active.id) ?? ""}</b
+      >
       {#if activeView.doc !== null}
         <!-- Board 30: directory and H1 (from the reader's parse); no pill, no state colour. -->
         {@const h1 = documentSessions.h1[active.id] ?? null}
@@ -232,7 +234,13 @@
     text-overflow: ellipsis;
     min-width: 0;
   }
+  /* A document's file name keeps its width; “dir · H1” takes what is left and is cut first. */
+  .docname {
+    flex: 0 0 auto;
+    max-width: 60%;
+  }
   .docsub {
+    flex: 1 1 0;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
