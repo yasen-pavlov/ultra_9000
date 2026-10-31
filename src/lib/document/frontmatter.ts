@@ -14,8 +14,9 @@ export interface Frontmatter {
   raw: string;
 }
 
-const YAML_KEY = /^([A-Za-z0-9_][\w .-]*?)\s*:(?:\s+(.*))?$/;
-const TOML_KEY = /^([A-Za-z0-9_][\w.-]*)\s*=\s*(.*)$/;
+/** Key names, checked after splitting at the separator (single quantifiers, no backtracking). */
+const YAML_KEY_NAME = /^\w[\w .-]*$/;
+const TOML_KEY_NAME = /^\w[\w.-]*$/;
 const TOML_TABLE = /^\[{1,2}[^\]]+\]{1,2}$/;
 
 function unquote(value: string): string {
@@ -27,25 +28,40 @@ function unquote(value: string): string {
   return trimmed;
 }
 
+/** A top-level `key: value` (YAML) or `key = value` (TOML) line as a field, else null. */
+function splitField(format: "yaml" | "toml", line: string): FrontmatterField | null {
+  if (/^\s/.test(line) || line.startsWith("- ")) return null;
+  const at = line.indexOf(format === "yaml" ? ":" : "=");
+  if (at <= 0) return null;
+  const key = line.slice(0, at).trim();
+  const rest = line.slice(at + 1);
+  if (!(format === "yaml" ? YAML_KEY_NAME : TOML_KEY_NAME).test(key)) return null;
+  // YAML needs whitespace (or nothing) after the colon: `see: http://x` splits, `http://x` does not.
+  if (format === "yaml" && rest !== "" && !/^\s/.test(rest)) return null;
+  return { key, value: unquote(rest) };
+}
+
+/** A TOML `[table]` header line as a field with no value, else null. */
+function tableField(format: "yaml" | "toml", line: string): FrontmatterField | null {
+  const text = line.trim();
+  return format === "toml" && TOML_TABLE.test(text) ? { key: text, value: "" } : null;
+}
+
+/** Nested, list and continuation lines join the previous value as written. */
+function appendLine(fields: FrontmatterField[], text: string): void {
+  const last = fields.at(-1);
+  if (last === undefined) fields.push({ key: "", value: text });
+  else last.value = last.value === "" ? text : `${last.value} ${text}`;
+}
+
 /** Splits top-level `key: value` (YAML) or `key = value` (TOML) lines; continuation lines join the previous value. */
 export function parseFrontmatter(format: "yaml" | "toml", raw: string): Frontmatter {
   const fields: FrontmatterField[] = [];
-  const pattern = format === "yaml" ? YAML_KEY : TOML_KEY;
   for (const line of raw.split("\n")) {
     if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
-    const topLevel = !/^\s/.test(line) && !line.startsWith("- ");
-    const match = topLevel ? pattern.exec(line) : null;
-    if (match !== null) {
-      fields.push({ key: match[1], value: unquote(match[2] ?? "") });
-      continue;
-    }
-    if (format === "toml" && TOML_TABLE.test(line.trim())) {
-      fields.push({ key: line.trim(), value: "" });
-      continue;
-    }
-    const last = fields.at(-1);
-    if (last === undefined) fields.push({ key: "", value: line.trim() });
-    else last.value = last.value === "" ? line.trim() : `${last.value} ${line.trim()}`;
+    const field = splitField(format, line) ?? tableField(format, line);
+    if (field === null) appendLine(fields, line.trim());
+    else fields.push(field);
   }
   return { format, fields, raw };
 }

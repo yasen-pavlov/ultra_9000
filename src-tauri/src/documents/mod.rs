@@ -135,7 +135,7 @@ fn modified(meta: &Metadata) -> u64 {
 }
 pub fn is_markdown(path: &Path) -> bool {
     path.extension()
-        .and_then(|s| s.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|s| s.eq_ignore_ascii_case("md") || s.eq_ignore_ascii_case("markdown"))
 }
 fn bounded(path: &Path, limit: u64, prefix: bool) -> std::io::Result<(Metadata, Vec<u8>)> {
@@ -235,118 +235,170 @@ impl Loaded {
         result: std::io::Result<(Metadata, Vec<u8>)>,
     ) -> ReadOutcome {
         match result {
-            Ok((meta, bytes)) => {
-                let identity = (meta.dev(), meta.ino());
-                let stamp = FileStamp::from_metadata(&meta);
-                let event = if self.state.status == DocumentStatus::Missing {
-                    DocumentEvent::Returned
-                } else if self.state.revision == 0 {
-                    DocumentEvent::Opened
-                } else if self.identity.is_some_and(|old| old != identity)
-                    || meta.len() < self.state.size_bytes
-                {
-                    DocumentEvent::Replaced
-                } else {
-                    DocumentEvent::Updated
-                };
-                if meta.len() > MAX_BYTES || bytes.len() as u64 > MAX_BYTES {
-                    let changed = self.state.status != DocumentStatus::TooLarge
-                        || self.state.size_bytes != meta.len();
-                    self.stamp = Some(stamp);
-                    if !self.text.is_empty() {
-                        self.text = Arc::from("");
-                    }
-                    if changed {
-                        self.state.status = DocumentStatus::TooLarge;
-                        self.state.error = None;
-                        self.state.size_bytes = meta.len();
-                        self.state.live_until_ms = modified(&meta).saturating_add(5000);
-                        self.state.last_event = event;
-                        self.state.last_event_at_ms = at;
-                    }
-                    return ReadOutcome::applied(changed);
-                }
-                let decoded = if bytes.contains(&0) {
-                    Err("File contains NUL bytes and is not UTF-8 text.".to_owned())
-                } else {
-                    match String::from_utf8(bytes) {
-                        Ok(text) => Ok(text),
-                        Err(error) if !strict && error.utf8_error().error_len().is_none() => {
-                            self.stamp = None;
-                            return ReadOutcome::Incomplete;
-                        }
-                        Err(error) => Err(error.to_string()),
-                    }
-                };
-                self.stamp = Some(stamp);
-                match decoded {
-                    Ok(text) => {
-                        let unchanged_text = self.text.as_ref() == text;
-                        let same = !force
-                            && self.state.revision > 0
-                            && self.state.status != DocumentStatus::TooLarge
-                            && unchanged_text;
-                        let status_changed =
-                            self.state.status != DocumentStatus::Ok || self.state.error.is_some();
-                        let modified = modified(&meta);
-                        let live_until = modified.saturating_add(5000);
-                        let changed = !same
-                            || status_changed
-                            || self.state.modified_ms != modified
-                            || self.state.size_bytes != meta.len()
-                            || self.state.live_until_ms != live_until;
-                        if !same {
-                            if !unchanged_text {
-                                self.text = Arc::from(text);
-                            }
-                            self.state.revision += 1;
-                        }
-                        if !same || status_changed {
-                            self.state.last_event = event;
-                            self.state.last_event_at_ms = at;
-                        }
-                        self.identity = Some(identity);
-                        self.state.status = DocumentStatus::Ok;
-                        self.state.error = None;
-                        self.state.modified_ms = modified;
-                        self.state.size_bytes = meta.len();
-                        self.state.live_until_ms = live_until;
-                        ReadOutcome::applied(changed)
-                    }
-                    Err(error) => {
-                        let changed = self.state.status != DocumentStatus::Unreadable
-                            || self.state.error.as_deref() != Some(error.as_str())
-                            || self.state.size_bytes != meta.len();
-                        if changed {
-                            self.state.status = DocumentStatus::Unreadable;
-                            self.state.error = Some(error);
-                            self.state.size_bytes = meta.len();
-                            self.state.last_event = event;
-                            self.state.last_event_at_ms = at;
-                        }
-                        ReadOutcome::applied(changed)
-                    }
-                }
-            }
-            Err(error) => {
+            Ok((metadata, bytes)) => self.apply_file_read(at, strict, force, metadata, bytes),
+            Err(error) => self.apply_io_error(at, error),
+        }
+    }
+
+    fn classify_event(&self, identity: (u64, u64), size: u64) -> DocumentEvent {
+        if self.state.status == DocumentStatus::Missing {
+            DocumentEvent::Returned
+        } else if self.state.revision == 0 {
+            DocumentEvent::Opened
+        } else if self.identity.is_some_and(|old| old != identity) || size < self.state.size_bytes {
+            DocumentEvent::Replaced
+        } else {
+            DocumentEvent::Updated
+        }
+    }
+
+    fn record_event(&mut self, event: DocumentEvent, at: u64) {
+        self.state.last_event = event;
+        self.state.last_event_at_ms = at;
+    }
+
+    fn apply_file_read(
+        &mut self,
+        at: u64,
+        strict: bool,
+        force: bool,
+        metadata: Metadata,
+        bytes: Vec<u8>,
+    ) -> ReadOutcome {
+        let identity = (metadata.dev(), metadata.ino());
+        let event = self.classify_event(identity, metadata.len());
+        self.stamp = Some(FileStamp::from_metadata(&metadata));
+        if metadata.len() > MAX_BYTES || bytes.len() as u64 > MAX_BYTES {
+            return self.apply_too_large(&metadata, event, at);
+        }
+        match decode_document_text(bytes, strict) {
+            Ok(text) => self.apply_text(&metadata, identity, text, event, at, force),
+            Err(TextDecodeError::Incomplete) => {
                 self.stamp = None;
-                let (status, error) = if error.kind() == std::io::ErrorKind::NotFound {
-                    (DocumentStatus::Missing, None)
-                } else {
-                    (DocumentStatus::Unreadable, Some(error.to_string()))
-                };
-                let changed = self.state.status != status || self.state.error != error;
-                if changed {
-                    self.state.status = status;
-                    self.state.error = error;
-                    if status == DocumentStatus::Missing {
-                        self.state.last_event = DocumentEvent::Missing;
-                    }
-                    self.state.last_event_at_ms = at;
-                }
-                ReadOutcome::applied(changed)
+                ReadOutcome::Incomplete
+            }
+            Err(TextDecodeError::Invalid(error)) => {
+                self.apply_unreadable(metadata.len(), error, event, at)
             }
         }
+    }
+
+    fn apply_too_large(
+        &mut self,
+        metadata: &Metadata,
+        event: DocumentEvent,
+        at: u64,
+    ) -> ReadOutcome {
+        let changed = self.state.status != DocumentStatus::TooLarge
+            || self.state.size_bytes != metadata.len();
+        if !self.text.is_empty() {
+            self.text = Arc::from("");
+        }
+        if changed {
+            self.state.status = DocumentStatus::TooLarge;
+            self.state.error = None;
+            self.state.size_bytes = metadata.len();
+            self.state.live_until_ms = modified(metadata).saturating_add(5000);
+            self.record_event(event, at);
+        }
+        ReadOutcome::applied(changed)
+    }
+
+    fn apply_text(
+        &mut self,
+        metadata: &Metadata,
+        identity: (u64, u64),
+        text: String,
+        event: DocumentEvent,
+        at: u64,
+        force: bool,
+    ) -> ReadOutcome {
+        let unchanged_text = self.text.as_ref() == text;
+        let same = !force
+            && self.state.revision > 0
+            && self.state.status != DocumentStatus::TooLarge
+            && unchanged_text;
+        let status_changed = self.state.status != DocumentStatus::Ok || self.state.error.is_some();
+        let modified = modified(metadata);
+        let live_until = modified.saturating_add(5000);
+        let changed = !same
+            || status_changed
+            || self.state.modified_ms != modified
+            || self.state.size_bytes != metadata.len()
+            || self.state.live_until_ms != live_until;
+        if !same {
+            if !unchanged_text {
+                self.text = Arc::from(text);
+            }
+            self.state.revision += 1;
+        }
+        if !same || status_changed {
+            self.record_event(event, at);
+        }
+        self.identity = Some(identity);
+        self.state.status = DocumentStatus::Ok;
+        self.state.error = None;
+        self.state.modified_ms = modified;
+        self.state.size_bytes = metadata.len();
+        self.state.live_until_ms = live_until;
+        ReadOutcome::applied(changed)
+    }
+
+    fn apply_unreadable(
+        &mut self,
+        size: u64,
+        error: String,
+        event: DocumentEvent,
+        at: u64,
+    ) -> ReadOutcome {
+        let changed = self.state.status != DocumentStatus::Unreadable
+            || self.state.error.as_deref() != Some(error.as_str())
+            || self.state.size_bytes != size;
+        if changed {
+            self.state.status = DocumentStatus::Unreadable;
+            self.state.error = Some(error);
+            self.state.size_bytes = size;
+            self.record_event(event, at);
+        }
+        ReadOutcome::applied(changed)
+    }
+
+    fn apply_io_error(&mut self, at: u64, error: std::io::Error) -> ReadOutcome {
+        self.stamp = None;
+        let (status, error) = if error.kind() == std::io::ErrorKind::NotFound {
+            (DocumentStatus::Missing, None)
+        } else {
+            (DocumentStatus::Unreadable, Some(error.to_string()))
+        };
+        let changed = self.state.status != status || self.state.error != error;
+        if changed {
+            self.state.status = status;
+            self.state.error = error;
+            if status == DocumentStatus::Missing {
+                self.state.last_event = DocumentEvent::Missing;
+            }
+            self.state.last_event_at_ms = at;
+        }
+        ReadOutcome::applied(changed)
+    }
+}
+
+enum TextDecodeError {
+    Incomplete,
+    Invalid(String),
+}
+fn decode_document_text(bytes: Vec<u8>, strict: bool) -> Result<String, TextDecodeError> {
+    if bytes.contains(&0) {
+        return Err(TextDecodeError::Invalid(
+            "File contains NUL bytes and is not UTF-8 text.".into(),
+        ));
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if !strict && error.utf8_error().error_len().is_none() => {
+            Err(TextDecodeError::Incomplete)
+        }
+        Err(error) => Err(TextDecodeError::Invalid(error.to_string())),
     }
 }
 
@@ -509,70 +561,112 @@ pub fn preview(path: &Path) -> Result<DocumentPreview, String> {
     let mut fence: Option<&str> = None;
     let mut frontmatter = text.starts_with("---\n") || text.starts_with("---\r\n");
     let mut paragraph: Vec<&str> = Vec::new();
-    let flush_paragraph = |paragraph: &mut Vec<&str>, preview: &mut DocumentPreview| {
-        if !paragraph.is_empty() && preview.first_paragraph.is_none() {
-            preview.first_paragraph = Some(paragraph.join(" "));
-        }
-        paragraph.clear();
-    };
     for (index, line) in text.lines().enumerate() {
         let line = line.trim();
-        if frontmatter {
-            if index > 0 && matches!(line, "---" | "...") {
-                frontmatter = false;
-            }
-            continue;
-        }
-        if let Some(marker) = fence {
-            if line.starts_with(marker) {
-                fence = None;
-            }
-            continue;
-        }
-        if line.starts_with("```") || line.starts_with("~~~") {
-            flush_paragraph(&mut paragraph, &mut preview);
-            fence = Some(&line[..3]);
-            continue;
-        }
-        let setext = !paragraph.is_empty()
-            && !line.is_empty()
-            && (line.bytes().all(|byte| byte == b'=') || line.bytes().all(|byte| byte == b'-'));
-        if setext {
-            preview.heading_count += 1;
-            if line.starts_with('=') && preview.h1.is_none() {
-                preview.h1 = Some(paragraph.join(" "));
-            }
-            paragraph.clear();
-            continue;
-        }
-        let level = line.bytes().take_while(|byte| *byte == b'#').count();
-        if (1..=6).contains(&level)
-            && (level == line.len()
-                || line
-                    .as_bytes()
-                    .get(level)
-                    .is_some_and(u8::is_ascii_whitespace))
+        if skip_preview_frontmatter(&mut frontmatter, index, line)
+            || skip_preview_fence(&mut fence, line, &mut paragraph, &mut preview)
+            || consume_preview_setext(line, &mut paragraph, &mut preview)
+            || consume_preview_atx(line, &mut paragraph, &mut preview)
         {
-            flush_paragraph(&mut paragraph, &mut preview);
-            preview.heading_count += 1;
-            if level == 1 && preview.h1.is_none() {
-                let heading = line[level..].trim();
-                let closing = heading.trim_end_matches('#');
-                let heading = if closing.ends_with(char::is_whitespace) {
-                    closing.trim_end()
-                } else {
-                    heading
-                };
-                preview.h1 = Some(heading.into());
-            }
-        } else if line.is_empty() || line.starts_with(['>', '-', '*', '|', '<']) {
-            flush_paragraph(&mut paragraph, &mut preview);
+            continue;
+        }
+        if line.is_empty() || line.starts_with(['>', '-', '*', '|', '<']) {
+            flush_preview_paragraph(&mut paragraph, &mut preview);
         } else {
             paragraph.push(line);
         }
     }
-    flush_paragraph(&mut paragraph, &mut preview);
+    flush_preview_paragraph(&mut paragraph, &mut preview);
     Ok(preview)
+}
+
+fn skip_preview_frontmatter(frontmatter: &mut bool, index: usize, line: &str) -> bool {
+    if !*frontmatter {
+        return false;
+    }
+    if index > 0 && matches!(line, "---" | "...") {
+        *frontmatter = false;
+    }
+    true
+}
+
+fn skip_preview_fence<'a>(
+    fence: &mut Option<&'a str>,
+    line: &'a str,
+    paragraph: &mut Vec<&'a str>,
+    preview: &mut DocumentPreview,
+) -> bool {
+    if let Some(marker) = fence {
+        if line.starts_with(*marker) {
+            *fence = None;
+        }
+        return true;
+    }
+    if line.starts_with("```") || line.starts_with("~~~") {
+        flush_preview_paragraph(paragraph, preview);
+        *fence = Some(&line[..3]);
+        return true;
+    }
+    false
+}
+
+fn consume_preview_setext(
+    line: &str,
+    paragraph: &mut Vec<&str>,
+    preview: &mut DocumentPreview,
+) -> bool {
+    let setext = !paragraph.is_empty()
+        && !line.is_empty()
+        && (line.bytes().all(|byte| byte == b'=') || line.bytes().all(|byte| byte == b'-'));
+    if !setext {
+        return false;
+    }
+    preview.heading_count += 1;
+    if line.starts_with('=') && preview.h1.is_none() {
+        preview.h1 = Some(paragraph.join(" "));
+    }
+    paragraph.clear();
+    true
+}
+
+fn consume_preview_atx(
+    line: &str,
+    paragraph: &mut Vec<&str>,
+    preview: &mut DocumentPreview,
+) -> bool {
+    let level = line.bytes().take_while(|byte| *byte == b'#').count();
+    let heading = (1..=6).contains(&level)
+        && (level == line.len()
+            || line
+                .as_bytes()
+                .get(level)
+                .is_some_and(u8::is_ascii_whitespace));
+    if !heading {
+        return false;
+    }
+    flush_preview_paragraph(paragraph, preview);
+    preview.heading_count += 1;
+    if level == 1 && preview.h1.is_none() {
+        preview.h1 = Some(preview_heading_text(&line[level..]).into());
+    }
+    true
+}
+
+fn preview_heading_text(text: &str) -> &str {
+    let heading = text.trim();
+    let closing = heading.trim_end_matches('#');
+    if closing.ends_with(char::is_whitespace) {
+        closing.trim_end()
+    } else {
+        heading
+    }
+}
+
+fn flush_preview_paragraph(paragraph: &mut Vec<&str>, preview: &mut DocumentPreview) {
+    if !paragraph.is_empty() && preview.first_paragraph.is_none() {
+        preview.first_paragraph = Some(paragraph.join(" "));
+    }
+    paragraph.clear();
 }
 
 struct Watched {

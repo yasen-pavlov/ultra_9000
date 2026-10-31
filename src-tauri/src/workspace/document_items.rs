@@ -1,5 +1,10 @@
 //! Document rows use the same selection and presentation authority, without a PTY or tool.
-use super::*;
+use super::{begin_launch, now, with, ItemKind, ItemState, Process, Record};
+use crate::{
+    documents::{self, DocumentState, Loaded},
+    status::Activity,
+};
+use std::path::{Path, PathBuf};
 
 pub fn open_document(loaded: Loaded, project: String, select_item: bool) -> Result<String, String> {
     with(|w| {

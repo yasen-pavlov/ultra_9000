@@ -21,7 +21,7 @@ class DocumentSessions {
   h1 = $state<Record<string, string | null>>({});
   /** `o` pressed on a showing rail hides it; remembered for every document. */
   railHidden = $state(false);
-  #memory = new Map<string, DocumentMemory>();
+  readonly #memory = new Map<string, DocumentMemory>();
 
   memory(itemId: string): DocumentMemory {
     let memory = this.#memory.get(itemId);

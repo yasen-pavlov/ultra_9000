@@ -112,70 +112,86 @@ function codeLanguage(code: Element): string | null {
   return language === undefined ? null : language.slice("language-".length);
 }
 
+/** Records a heading for the outline and gives it a slug id and its source line. */
+function markHeading(node: Element, level: number, slugger: GithubSlugger, headings: DocumentHeading[]): void {
+  const text = textOf(node).trim();
+  const slug = slugger.slug(text);
+  const line = node.position?.start.line ?? 0;
+  node.properties.id = slug;
+  node.properties.dataLine = line;
+  headings.push({ level, text, slug, id: `${ID_PREFIX}${slug}`, line });
+}
+
+interface CodeState {
+  highlighter: HighlighterCore | null;
+  /** Characters of code still allowed through Shiki in this render. */
+  budget: number;
+  /** Set when a block waits for Shiki to load. */
+  pending: { code: boolean };
+}
+
+/** A Shiki-highlighted copy of the block's <pre>, or the block itself (unknown language, over budget, no Shiki). */
+function highlighted(pre: Element, language: string | null, source: string, state: CodeState): Element {
+  if (language === null) return pre;
+  if (state.highlighter === null) {
+    state.pending.code = true;
+    return pre;
+  }
+  if (!state.highlighter.getLoadedLanguages().includes(language) || source.length > state.budget) return pre;
+  state.budget -= source.length;
+  const root = state.highlighter.codeToHast(source.replace(/\n$/, ""), {
+    lang: language,
+    theme: CODE_THEME.name ?? "u9k",
+  });
+  const shiki = root.children.find((child): child is Element => child.type === "element");
+  return shiki === undefined ? pre : { ...shiki, properties: { className: ["shiki"] } };
+}
+
+/** The wrapper a fenced block becomes: a Mermaid box, a code block, or null to leave it (math). */
+function codeBlock(pre: Element, state: CodeState): Element | null {
+  const code = pre.children.find((child): child is Element => child.type === "element" && child.tagName === "code");
+  if (code === undefined) return null;
+  const language = codeLanguage(code);
+  if (language === "math") return null;
+  const source = textOf(code);
+  const line = pre.position?.start.line ?? 0;
+  if (language === "mermaid") {
+    const lines = source.replace(/\n$/, "").split("\n").length;
+    return {
+      type: "element",
+      tagName: "div",
+      properties: { className: ["mermaid"], dataLine: line, dataLines: lines },
+      children: [pre],
+    };
+  }
+  return {
+    type: "element",
+    tagName: "div",
+    properties: { className: ["code-block"], dataLine: line, dataLang: language ?? "" },
+    children: [highlighted(pre, language, source, state)],
+  };
+}
+
 /** The reader's structure: heading slugs and lines, block lines, code and Mermaid wrappers, Shiki. */
 function rehypeStructure(headings: DocumentHeading[], highlighter: HighlighterCore | null, pending: { code: boolean }) {
   return () => (tree: HastRoot) => {
     const slugger = new GithubSlugger();
-    let budget = HIGHLIGHT_BUDGET;
+    const state: CodeState = { highlighter, budget: HIGHLIGHT_BUDGET, pending };
     for (const child of tree.children) {
       if (child.type === "element" && child.position !== undefined)
         child.properties.dataLine = child.position.start.line;
     }
     visit(tree, "element", (node, index, parent) => {
       const level = /^h([1-6])$/.exec(node.tagName);
+      // remark-rehype's own “Footnotes” label is not a document heading.
       if (level !== null) {
-        // remark-rehype's own “Footnotes” label is not a document heading.
-        if (classes(node).includes("sr-only")) return;
-        const text = textOf(node).trim();
-        const slug = slugger.slug(text);
-        node.properties.id = slug;
-        const line = node.position?.start.line ?? 0;
-        node.properties.dataLine = line;
-        headings.push({ level: Number(level[1]), text, slug, id: `${ID_PREFIX}${slug}`, line });
+        if (!classes(node).includes("sr-only")) markHeading(node, Number(level[1]), slugger, headings);
         return;
       }
       if (node.tagName !== "pre" || parent === undefined || index === undefined) return;
-      const code = node.children.find(
-        (child): child is Element => child.type === "element" && child.tagName === "code",
-      );
-      if (code === undefined) return;
-      const language = codeLanguage(code);
-      if (language === "math") return;
-      const source = textOf(code);
-      const line = node.position?.start.line ?? 0;
-      if (language === "mermaid") {
-        const lines = source.replace(/\n$/, "").split("\n").length;
-        const box: Element = {
-          type: "element",
-          tagName: "div",
-          properties: { className: ["mermaid"], dataLine: line, dataLines: lines },
-          children: [node],
-        };
-        parent.children[index] = box;
-        return "skip";
-      }
-      let block: Element = node;
-      if (language !== null && highlighter !== null) {
-        const known = highlighter.getLoadedLanguages().includes(language);
-        if (known && source.length <= budget) {
-          budget -= source.length;
-          const highlighted = highlighter.codeToHast(source.replace(/\n$/, ""), {
-            lang: language,
-            theme: CODE_THEME.name ?? "u9k",
-          });
-          const pre = highlighted.children.find((child): child is Element => child.type === "element");
-          if (pre !== undefined) block = { ...pre, properties: { className: ["shiki"] } };
-        }
-      } else if (language !== null) {
-        pending.code = true;
-      }
-      const wrapper: Element = {
-        type: "element",
-        tagName: "div",
-        properties: { className: ["code-block"], dataLine: line, dataLang: language ?? "" },
-        children: [block],
-      };
-      parent.children[index] = wrapper;
+      const block = codeBlock(node, state);
+      if (block === null) return;
+      parent.children[index] = block;
       return "skip";
     });
   };
@@ -231,8 +247,8 @@ async function resolveImages(tree: HastRoot, loadAsset: RenderOptions["loadAsset
         relative.set(path, pending);
       }
       const url = await pending;
-      if (url === null || !url.startsWith("data:")) parent.children[index] = fallback(alt, src);
-      else node.properties.src = url;
+      if (url?.startsWith("data:") === true) node.properties.src = url;
+      else parent.children[index] = fallback(alt, src);
     }),
   );
 }

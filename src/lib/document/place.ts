@@ -63,7 +63,9 @@ export function headingStep(
   else {
     const current = currentHeadingIndex(headings, scrollTop);
     const inside = current >= 0 && headings[current].top < scrollTop + HEADING_OFFSET - 2;
-    index = direction === 1 ? current + 1 : inside ? current : current - 1;
+    if (direction === 1) index = current + 1;
+    else if (inside) index = current;
+    else index = current - 1;
   }
   return index >= 0 && index < headings.length ? index : null;
 }

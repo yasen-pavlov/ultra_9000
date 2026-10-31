@@ -81,21 +81,30 @@ function load(): Promise<Mermaid> {
   return loading;
 }
 
-const REFUSED: readonly [RegExp, string][] = [
-  [/@\{/, "node metadata (images, icons) is not shown in diagrams"],
-  [/^\s*click\s/im, "links and click actions are not shown in diagrams"],
-  [/%%\{/, "diagram config is not used in the reader"],
-  [/url\(/i, "external resources are not shown in diagrams"],
-  // A tag start only: arrows (`<-->`), class stereotypes (`<<interface>>`, the second `<` follows
-  // the first) and `x < y` stay ordinary text.
-  [/(?<!<)<[A-Za-z/!?]/, "HTML is not shown in diagrams"],
-  [/href/i, "links are not shown in diagrams"],
-  [/javascript:/i, "links are not shown in diagrams"],
+/** A `click` directive line: `click` then whitespace, after any indentation. */
+function clickLine(line: string): boolean {
+  const text = line.trimStart();
+  return text.startsWith("click") && (text[5] === " " || text[5] === "\t");
+}
+
+/** A tag start, never a stereotype's second `<`: arrows (`<-->`) and `x < y` stay ordinary text. */
+const TAG_START = /(?<!<)<[A-Za-z/!?]/;
+
+/** Plain substring and line checks (no backtracking): agent-written sources can be large. */
+const REFUSED: readonly [(source: string, lower: string) => boolean, string][] = [
+  [(source) => source.includes("@{"), "node metadata (images, icons) is not shown in diagrams"],
+  [(_, lower) => lower.split("\n").some(clickLine), "links and click actions are not shown in diagrams"],
+  [(source) => source.includes("%%{"), "diagram config is not used in the reader"],
+  [(_, lower) => lower.includes("url("), "external resources are not shown in diagrams"],
+  [(source) => TAG_START.test(source), "HTML is not shown in diagrams"],
+  [(_, lower) => lower.includes("href"), "links are not shown in diagrams"],
+  [(_, lower) => lower.includes("javascript:"), "links are not shown in diagrams"],
 ];
 
 /** Why a source is refused before rendering, or null when it may render. */
 export function refusedMermaid(source: string): string | null {
-  return REFUSED.find(([pattern]) => pattern.test(source))?.[1] ?? null;
+  const lower = source.toLowerCase();
+  return REFUSED.find(([refused]) => refused(source, lower))?.[1] ?? null;
 }
 
 const DROPPED_ELEMENTS = "style, foreignObject, image, img, a, script, iframe, object, embed";
@@ -111,9 +120,11 @@ export function cleanMermaidSvg(svg: string): string {
   const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
   const root = parsed.documentElement;
   if (root.nodeName.toLowerCase() !== "svg" || parsed.getElementsByTagName("parsererror").length > 0) return "";
-  for (const element of [...root.querySelectorAll(DROPPED_ELEMENTS)]) element.remove();
+  for (const element of root.querySelectorAll(DROPPED_ELEMENTS)) element.remove();
   for (const element of [root, ...root.querySelectorAll("*")]) {
-    for (const attribute of [...element.attributes]) {
+    // Attributes are a live map: collect first, then remove.
+    const doomed: string[] = [];
+    for (const attribute of element.attributes) {
       const name = attribute.name.toLowerCase();
       const reference = name === "href" || name === "xlink:href" || name === "src";
       if (
@@ -122,9 +133,10 @@ export function cleanMermaidSvg(svg: string): string {
         OUTSIDE_URL.test(attribute.value) ||
         /@keyframes|@import/i.test(attribute.value)
       ) {
-        element.removeAttributeNode(attribute);
+        doomed.push(attribute.name);
       }
     }
+    for (const name of doomed) element.removeAttribute(name);
   }
   return new XMLSerializer().serializeToString(root);
 }

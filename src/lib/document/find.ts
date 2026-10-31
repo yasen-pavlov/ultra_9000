@@ -62,6 +62,8 @@ export function markMatches(
 
 /** Index of the first match at or after the view's top, so find starts where the reader is. */
 export function firstMatchFrom(tops: readonly number[], scrollTop: number): number {
-  const index = tops.findIndex((top) => top >= scrollTop);
-  return index < 0 ? 0 : index;
+  return Math.max(
+    0,
+    tops.findIndex((top) => top >= scrollTop),
+  );
 }
