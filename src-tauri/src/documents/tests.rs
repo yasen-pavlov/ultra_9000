@@ -2,6 +2,31 @@ use super::*;
 use std::{io::Write, os::unix::fs::symlink};
 use tempfile::TempDir;
 
+fn temp_dir() -> TempDir {
+    TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+}
+
+struct TestWatcher;
+impl DirectoryWatch for TestWatcher {
+    fn watch_directory(&mut self, _directory: &Path) -> Result<(), notify::Error> {
+        Ok(())
+    }
+    fn unwatch_directory(&mut self, _directory: &Path) -> Result<(), notify::Error> {
+        Ok(())
+    }
+}
+fn test_manager() -> Manager<TestWatcher> {
+    Manager::from_watcher(Some(TestWatcher))
+}
+fn set_modified(path: &Path, seconds: u64) {
+    File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(seconds)))
+        .unwrap();
+}
+
 fn read_document(path: &Path, follow: bool, at: u64) -> Loaded {
     let (path, project) = locate(path, &[]).unwrap();
     open(&path, &project, follow, at).unwrap()
@@ -9,7 +34,7 @@ fn read_document(path: &Path, follow: bool, at: u64) -> Loaded {
 
 #[test]
 fn bounded_reads_status_and_successful_revisions() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("report.MD");
     fs::write(&path, "# Report\n").unwrap();
     let mut file = read_document(&path, true, 10);
@@ -42,7 +67,7 @@ fn bounded_reads_status_and_successful_revisions() {
 
 #[test]
 fn assets_are_bounded_and_confined_even_through_symlinks() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let root = dir.path().join("docs");
     fs::create_dir(&root).unwrap();
     let doc = root.join("a.md");
@@ -64,7 +89,7 @@ fn assets_are_bounded_and_confined_even_through_symlinks() {
 
 #[test]
 fn recent_scan_honors_ignore_hidden_bounds_and_ordering() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     fs::create_dir(dir.path().join(".git")).unwrap();
     fs::create_dir(dir.path().join(".hidden")).unwrap();
     fs::write(dir.path().join(".gitignore"), "ignored.md\n").unwrap();
@@ -88,7 +113,7 @@ fn recent_scan_honors_ignore_hidden_bounds_and_ordering() {
 
 #[test]
 fn preview_uses_only_the_bounded_prefix_and_ignores_frontmatter_and_fences() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("report.md");
     let mut file = File::create(&path).unwrap();
     file.write_all(b"---\nname: report\n---\n# Report\n\nFirst paragraph\ncontinues.\n\n```md\n# Not a heading\n```\n## Detail\n").unwrap();
@@ -135,7 +160,7 @@ fn wait_event(
 
 #[test]
 fn real_directory_watch_reports_update_replace_missing_and_return() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("report.md");
     let second = dir.path().join("other.md");
     fs::write(&path, "initial").unwrap();
@@ -196,10 +221,10 @@ fn real_directory_watch_reports_update_replace_missing_and_return() {
 
 #[test]
 fn missing_grace_keeps_atomic_saves_ok_with_injected_clock() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "first").unwrap();
-    let mut manager = Manager::new(|_| {}).unwrap();
+    let mut manager = test_manager();
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -215,12 +240,14 @@ fn missing_grace_keeps_atomic_saves_ok_with_injected_clock() {
     manager.due(at + Duration::from_millis(499), 599, |_, _| {
         panic!("missing flashed before 500 ms")
     });
-    fs::write(&path, "second").unwrap();
+    // Shrinking is a replacement signal even on filesystems that reuse the removed inode.
+    fs::write(&path, "x").unwrap();
     let mut states = Vec::new();
     manager.due(at + MISSING_GRACE, 600, |_, state| states.push(state));
     assert_eq!(states.len(), 1);
     assert_eq!(states[0].status, DocumentStatus::Ok);
     assert_eq!(states[0].last_event, DocumentEvent::Replaced);
+    assert_eq!(manager.text("a").unwrap().text.as_ref(), "x");
 }
 
 #[test]
@@ -245,7 +272,7 @@ fn external_links_cannot_dispatch_launchers_or_navigate_the_webview() {
 
 #[test]
 fn scan_cache_refreshes_for_each_palette_presentation() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     fs::write(dir.path().join("first.md"), "# First\n").unwrap();
     assert_eq!(project_documents(dir.path(), 1).entries.len(), 1);
     fs::write(dir.path().join("second.md"), "# Second\n").unwrap();
@@ -255,7 +282,7 @@ fn scan_cache_refreshes_for_each_palette_presentation() {
 
 #[test]
 fn directory_watch_recovers_when_the_parent_directory_returns() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let parent = dir.path().join("docs");
     fs::create_dir(&parent).unwrap();
     let path = parent.join("a.md");
@@ -286,7 +313,7 @@ fn directory_watch_recovers_when_the_parent_directory_returns() {
 
 #[test]
 fn assets_cannot_expand_scope_when_the_document_directory_is_replaced_by_a_symlink() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let root = dir.path().join("docs");
     let outside = dir.path().join("outside");
     fs::create_dir(&root).unwrap();
@@ -302,10 +329,10 @@ fn assets_cannot_expand_scope_when_the_document_directory_is_replaced_by_a_symli
 
 #[test]
 fn absent_watcher_keeps_last_text_and_polls_for_updates() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "before").unwrap();
-    let mut manager = Manager::from_watcher(None);
+    let mut manager = Manager::<TestWatcher>::from_watcher(None);
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -327,7 +354,7 @@ fn absent_watcher_keeps_last_text_and_polls_for_updates() {
 
 #[test]
 fn watch_registration_error_still_inserts_readable_document() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let parent = dir.path().join("docs");
     fs::create_dir(&parent).unwrap();
     let path = parent.join("a.md");
@@ -355,10 +382,10 @@ fn changed(path: &Path) -> Event {
 
 #[test]
 fn trailing_debounce_waits_for_quiet_but_caps_a_continuous_burst() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "before").unwrap();
-    let mut manager = Manager::new(|_| {}).unwrap();
+    let mut manager = test_manager();
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -389,10 +416,10 @@ fn trailing_debounce_waits_for_quiet_but_caps_a_continuous_burst() {
 
 #[test]
 fn incomplete_utf8_tail_keeps_previous_text_and_rearms() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "before").unwrap();
-    let mut manager = Manager::new(|_| {}).unwrap();
+    let mut manager = test_manager();
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -414,7 +441,7 @@ fn incomplete_utf8_tail_keeps_previous_text_and_rearms() {
 
 #[test]
 fn identical_and_metadata_only_reads_keep_revision_event_and_arc() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "same").unwrap();
     let mut loaded = read_document(&path, false, 1);
@@ -451,10 +478,10 @@ fn identical_and_metadata_only_reads_keep_revision_event_and_arc() {
 
 #[test]
 fn missing_and_unreadable_states_serve_last_good_text_after_remount() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "last good").unwrap();
-    let mut manager = Manager::new(|_| {}).unwrap();
+    let mut manager = test_manager();
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -477,7 +504,7 @@ fn missing_and_unreadable_states_serve_last_good_text_after_remount() {
 
 #[test]
 fn nul_after_the_first_eight_kib_is_unreadable() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     let mut text = vec![b'a'; 9000];
     text.push(0);
@@ -490,7 +517,7 @@ fn nul_after_the_first_eight_kib_is_unreadable() {
 
 #[test]
 fn scan_keeps_hidden_markdown_files_but_skips_hidden_directories() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     fs::write(dir.path().join(".notes.md"), "# Notes\n").unwrap();
     fs::create_dir(dir.path().join(".hidden")).unwrap();
     fs::write(dir.path().join(".hidden/no.md"), "# Hidden\n").unwrap();
@@ -501,7 +528,7 @@ fn scan_keeps_hidden_markdown_files_but_skips_hidden_directories() {
 
 #[test]
 fn preview_preserves_hash_suffixes_ends_paragraphs_and_counts_setext() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     for (text, h1, count, paragraph) in [
         ("# Learning C#\n", Some("Learning C#"), 1, None),
@@ -541,7 +568,7 @@ fn worker_reply_wait_has_a_bounded_timeout_and_reports_disconnects() {
 
 #[test]
 fn locate_uses_canonical_identity_and_enforces_roots() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let root = dir.path().join("project");
     fs::create_dir_all(root.join(".git")).unwrap();
     let path = root.join("a.md");
@@ -561,7 +588,7 @@ fn locate_uses_canonical_identity_and_enforces_roots() {
 
 #[test]
 fn one_slow_project_scan_does_not_hold_the_global_cache_lock() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let first = dir.path().join("first");
     let second = dir.path().join("second");
     fs::create_dir(&first).unwrap();
@@ -596,7 +623,7 @@ fn one_slow_project_scan_does_not_hold_the_global_cache_lock() {
 
 #[test]
 fn bounded_read_mode_is_explicit_and_independent_of_the_size_limit() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "abcdef").unwrap();
     let (metadata, bytes) = bounded(&path, 3, false).unwrap();
@@ -608,10 +635,10 @@ fn bounded_read_mode_is_explicit_and_independent_of_the_size_limit() {
 
 #[test]
 fn a_permanently_truncated_utf8_tail_settles_after_one_event_retry() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "before").unwrap();
-    let mut manager = Manager::new(|_| {}).unwrap();
+    let mut manager = test_manager();
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -655,10 +682,10 @@ fn a_permanently_truncated_utf8_tail_settles_after_one_event_retry() {
 
 #[test]
 fn explicit_reload_is_strict_and_forces_unchanged_text_to_a_new_revision() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "before").unwrap();
-    let mut manager = Manager::new(|_| {}).unwrap();
+    let mut manager = test_manager();
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -688,10 +715,10 @@ fn explicit_reload_is_strict_and_forces_unchanged_text_to_a_new_revision() {
 
 #[test]
 fn too_large_drops_and_refuses_text_then_reloads_an_empty_file() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "before").unwrap();
-    let mut manager = Manager::new(|_| {}).unwrap();
+    let mut manager = test_manager();
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -724,7 +751,7 @@ fn too_large_drops_and_refuses_text_then_reloads_an_empty_file() {
 
 #[test]
 fn open_consumes_the_located_identity_without_revalidating_the_path() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "before").unwrap();
     let (canonical, project) = locate(&path, &[]).unwrap();
@@ -737,10 +764,11 @@ fn open_consumes_the_located_identity_without_revalidating_the_path() {
 
 #[test]
 fn unchanged_polling_skips_body_reads_but_events_still_read() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let path = dir.path().join("a.md");
     fs::write(&path, "before").unwrap();
-    let mut manager = Manager::from_watcher(None);
+    set_modified(&path, 100);
+    let mut manager = Manager::<TestWatcher>::from_watcher(None);
     manager
         .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
@@ -749,7 +777,7 @@ fn unchanged_polling_skips_body_reads_but_events_still_read() {
     for tick in 0..3 {
         manager.due_with(
             at + MISSING_GRACE * tick,
-            2,
+            102_000 + u64::from(tick) * 500,
             |_, _| panic!("unchanged poll"),
             |path| {
                 reads += 1;
@@ -759,9 +787,10 @@ fn unchanged_polling_skips_body_reads_but_events_still_read() {
     }
     assert_eq!(reads, 0);
     fs::write(&path, "after the poll").unwrap();
+    set_modified(&path, 101);
     manager.due_with(
         at + MISSING_GRACE * 3,
-        3,
+        103_500,
         |_, _| {},
         |path| {
             reads += 1;
@@ -772,7 +801,7 @@ fn unchanged_polling_skips_body_reads_but_events_still_read() {
     assert_eq!(manager.text("a").unwrap().text.as_ref(), "after the poll");
     manager.due_with(
         at + MISSING_GRACE * 4,
-        4,
+        104_000,
         |_, _| panic!("unchanged poll"),
         |path| {
             reads += 1;
@@ -784,7 +813,7 @@ fn unchanged_polling_skips_body_reads_but_events_still_read() {
     manager.event(changed(&path), event_at);
     manager.due_with(
         event_at + COALESCE,
-        5,
+        104_100,
         |_, _| panic!("same event content"),
         |path| {
             reads += 1;
@@ -792,4 +821,55 @@ fn unchanged_polling_skips_body_reads_but_events_still_read() {
         },
     );
     assert_eq!(reads, 2);
+}
+
+#[test]
+fn polling_reads_equal_coarse_stamps_until_the_timestamp_bucket_settles() {
+    let dir = temp_dir();
+    let path = dir.path().join("a.md");
+    fs::write(&path, "before").unwrap();
+    set_modified(&path, 100);
+    let mut manager = Manager::<TestWatcher>::from_watcher(None);
+    manager
+        .watch("a".into(), read_document(&path, false, 100_000))
+        .unwrap();
+    let previous = manager.text("a").unwrap();
+    let stamp = manager.files["a"].loaded.stamp.unwrap();
+    // Model two same-size writes in one one-second filesystem timestamp bucket.
+    fs::write(&path, "after!").unwrap();
+    set_modified(&path, 100);
+    assert_eq!(
+        FileStamp::from_metadata(&fs::metadata(&path).unwrap()),
+        stamp
+    );
+    let at = Instant::now() + COALESCE;
+    let mut reads = 0;
+    manager.due_with(
+        at,
+        100_100,
+        |_, _| {},
+        |path| {
+            reads += 1;
+            bounded(path, MAX_BYTES, false)
+        },
+    );
+    assert_eq!(
+        reads, 1,
+        "a fresh equal stamp cannot prove the body is unchanged"
+    );
+    assert_eq!(manager.text("a").unwrap().text.as_ref(), "after!");
+    assert_eq!(manager.text("a").unwrap().revision, previous.revision + 1);
+    manager.due_with(
+        at + MISSING_GRACE,
+        101_100,
+        |_, _| panic!("unchanged settled poll"),
+        |path| {
+            reads += 1;
+            bounded(path, MAX_BYTES, false)
+        },
+    );
+    assert_eq!(
+        reads, 1,
+        "an old stable stamp should still avoid a body read"
+    );
 }

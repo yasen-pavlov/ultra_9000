@@ -112,6 +112,20 @@ impl FileStamp {
             modified: metadata.modified().ok(),
         }
     }
+    fn is_settled_match(&self, metadata: &Metadata, now_ms: u64) -> bool {
+        if *self != Self::from_metadata(metadata) {
+            return false;
+        }
+        // A coarse filesystem can report the same mtime for two writes in one second.
+        // Only skip bodies after that timestamp bucket is safely in the past.
+        self.modified
+            .and_then(|modified| {
+                UNIX_EPOCH
+                    .checked_add(Duration::from_millis(now_ms))
+                    .and_then(|now| now.duration_since(modified).ok())
+            })
+            .is_some_and(|age| age >= Duration::from_secs(1))
+    }
 }
 fn modified(meta: &Metadata) -> u64 {
     meta.modified()
@@ -567,13 +581,25 @@ struct Watched {
     missing_since: Option<Instant>,
     first_event: Option<Instant>,
 }
-pub struct Manager {
-    watcher: Option<RecommendedWatcher>,
+trait DirectoryWatch {
+    fn watch_directory(&mut self, directory: &Path) -> Result<(), notify::Error>;
+    fn unwatch_directory(&mut self, directory: &Path) -> Result<(), notify::Error>;
+}
+impl DirectoryWatch for RecommendedWatcher {
+    fn watch_directory(&mut self, directory: &Path) -> Result<(), notify::Error> {
+        self.watch(directory, RecursiveMode::NonRecursive)
+    }
+    fn unwatch_directory(&mut self, directory: &Path) -> Result<(), notify::Error> {
+        self.unwatch(directory)
+    }
+}
+struct Manager<W = RecommendedWatcher> {
+    watcher: Option<W>,
     unwatched: std::collections::HashSet<PathBuf>,
     directories: HashMap<PathBuf, usize>,
     files: HashMap<String, Watched>,
 }
-impl Manager {
+impl Manager<RecommendedWatcher> {
     pub fn new(
         callback: impl FnMut(Result<Event, notify::Error>) + Send + 'static,
     ) -> Result<Self, String> {
@@ -581,7 +607,9 @@ impl Manager {
             notify::recommended_watcher(callback).map_err(|error| error.to_string())?,
         )))
     }
-    fn from_watcher(watcher: Option<RecommendedWatcher>) -> Self {
+}
+impl<W: DirectoryWatch> Manager<W> {
+    fn from_watcher(watcher: Option<W>) -> Self {
         Self {
             watcher,
             unwatched: std::collections::HashSet::new(),
@@ -597,7 +625,7 @@ impl Manager {
         let watch_error = if !self.directories.contains_key(&dir) {
             match &mut self.watcher {
                 Some(watcher) => watcher
-                    .watch(&dir, RecursiveMode::NonRecursive)
+                    .watch_directory(&dir)
                     .err()
                     .map(|error| error.to_string()),
                 None => None,
@@ -627,7 +655,7 @@ impl Manager {
                 *count -= 1;
                 if *count == 0 {
                     if let Some(watcher) = &mut self.watcher {
-                        let _ = watcher.unwatch(dir);
+                        let _ = watcher.unwatch_directory(dir);
                     }
                     self.unwatched.remove(dir);
                     self.directories.remove(dir);
@@ -685,11 +713,9 @@ impl Manager {
         let watcher = &mut self.watcher;
         self.unwatched.retain(|directory| {
             !directory.is_dir()
-                || watcher.as_mut().is_none_or(|watcher| {
-                    watcher
-                        .watch(directory, RecursiveMode::NonRecursive)
-                        .is_err()
-                })
+                || watcher
+                    .as_mut()
+                    .is_none_or(|watcher| watcher.watch_directory(directory).is_err())
         });
         for (id, file) in &mut self.files {
             if !file.due.is_some_and(|due| due <= instant) {
@@ -710,7 +736,10 @@ impl Manager {
                 && !event_driven
                 && fs::metadata(path).is_ok_and(|metadata| {
                     metadata.is_file()
-                        && file.loaded.stamp == Some(FileStamp::from_metadata(&metadata))
+                        && file
+                            .loaded
+                            .stamp
+                            .is_some_and(|stamp| stamp.is_settled_match(&metadata, now))
                 })
             {
                 continue;
