@@ -779,14 +779,20 @@ mod flows {
         assert_eq!(item(&t).cwd, "/p/one/src");
     }
 
+    const EMPTY_ZIP: &[u8] =
+        b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
     /// An OMP cwd inside its project, linking to a file outside that project.
-    fn file_link_source(host: &FakeHost) -> (tempfile::TempDir, String, SessionKey, String) {
+    fn file_link_source(
+        host: &FakeHost,
+        contents: &[u8],
+    ) -> (tempfile::TempDir, String, SessionKey, String) {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         let cwd = project.join("subdirectory");
         std::fs::create_dir_all(&cwd).unwrap();
         let file = dir.path().join("+file;$(touch injected)%#?{cwd}.png");
-        std::fs::write(&file, "file").unwrap();
+        std::fs::write(&file, contents).unwrap();
         let uri = tauri::Url::from_file_path(&file).unwrap().to_string();
         let id = begin_launch(
             "omp".into(),
@@ -802,10 +808,18 @@ mod flows {
         (dir, id, key, uri)
     }
 
+    const JAR_NAME: &str = "+launcher;$(touch injected)%#?{cwd}.JAR";
+
+    fn jar_uri(dir: &Path) -> String {
+        let path = dir.join(JAR_NAME);
+        std::fs::write(&path, EMPTY_ZIP).unwrap();
+        tauri::Url::from_file_path(path).unwrap().to_string()
+    }
+
     #[test]
     fn file_click_opens_new_selected_neovim_after_origin_with_exact_cwd_project_and_argv() {
         let host = install();
-        let (dir, source, key, uri) = file_link_source(&host);
+        let (dir, source, key, uri) = file_link_source(&host, b"text\n");
         host.omp(&source, WORKING);
         let other = launch("omp", "/other-project");
         host_event(key, embed::HostEvent::OpenFile(&uri));
@@ -852,9 +866,120 @@ mod flows {
     }
 
     #[test]
+    fn external_file_routes_leave_workspace_and_source_unchanged() {
+        for reveal in [false, true] {
+            for covered in [false, true] {
+                let host = install();
+                let (dir, source, key, uri) = file_link_source(&host, EMPTY_ZIP);
+                let uri = if reveal { jar_uri(dir.path()) } else { uri };
+                host.omp(&source, WORKING);
+                deliver(key, embed::HostEvent::OpenFile(&uri));
+                let other = launch("shell", "/other-project");
+                if covered {
+                    sheet_open(OpenableSheet::Settings).unwrap();
+                }
+                let before = serde_json::to_value(snap()).unwrap();
+                let prepared = host.prepared.borrow().len();
+                host.complete_file();
+                assert_eq!(serde_json::to_value(snap()).unwrap(), before);
+                assert_eq!(ids(), vec![source.clone(), other.clone()]);
+                assert_eq!(active(), Some(other));
+                assert_eq!(host.prepared.borrow().len(), prepared);
+                let expected = dir.path().join(if reveal {
+                    JAR_NAME
+                } else {
+                    "+file;$(touch injected)%#?{cwd}.png"
+                });
+                if reveal {
+                    assert!(host.system_files.borrow().is_empty());
+                    assert_eq!(
+                        host.revealed_files.borrow().front().map(String::as_str),
+                        expected.to_str()
+                    );
+                    host.complete_reveal_file(Ok(()));
+                } else {
+                    assert!(host.revealed_files.borrow().is_empty());
+                    assert_eq!(
+                        host.system_files.borrow().front().map(String::as_str),
+                        expected.to_str()
+                    );
+                    host.complete_system_file(Ok(()));
+                }
+                assert_eq!(item(&source).process, Process::Running);
+                assert_eq!(item(&source).activity, Activity::Working);
+                assert_eq!(host.key(&source), Some(key));
+                assert!(host.calls_of("stop").is_empty());
+                assert_eq!(serde_json::to_value(snap()).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn external_failure_is_visible_without_creating_an_editor_or_closing_the_sheet() {
+        for reveal in [false, true] {
+            let host = install();
+            let (dir, source, key, uri) = file_link_source(&host, EMPTY_ZIP);
+            let uri = if reveal { jar_uri(dir.path()) } else { uri };
+            deliver(key, embed::HostEvent::OpenFile(&uri));
+            sheet_open(OpenableSheet::Settings).unwrap();
+            let before_sheet = sheet();
+            host.complete_file();
+            assert!(snap().notices.is_empty());
+            let result = Err("desktop dispatch failed".into());
+            if reveal {
+                assert!(host.system_files.borrow().is_empty());
+                host.complete_reveal_file(result);
+            } else {
+                assert!(host.revealed_files.borrow().is_empty());
+                host.complete_system_file(result);
+            }
+            assert_eq!(ids(), vec![source.clone()]);
+            assert_eq!(active(), Some(source.clone()));
+            assert_eq!(sheet(), before_sheet);
+            assert_eq!(host.prepared.borrow().len(), 1);
+            assert_eq!(host.key(&source), Some(key));
+            assert_eq!(item(&source).process, Process::Running);
+            let notice = snap().notices.pop().unwrap();
+            assert_eq!(notice.kind, "error");
+            assert_eq!(notice.body, "desktop dispatch failed");
+            assert!(host.calls_of("stop").is_empty());
+        }
+    }
+
+    #[test]
+    fn file_dispatch_errors_do_not_fall_back_to_the_other_route() {
+        for contents in [b"text\n".as_slice(), EMPTY_ZIP] {
+            let host = install();
+            let (_dir, source, key, uri) = file_link_source(&host, contents);
+            with(|w| {
+                w.settings.tools.retain(|tool| tool.id != "neovim");
+                Ok(())
+            })
+            .unwrap();
+            deliver(key, embed::HostEvent::OpenFile(&uri));
+            host.complete_file();
+            assert_eq!(ids(), vec![source.clone()]);
+            assert_eq!(active(), Some(source.clone()));
+            assert_eq!(host.prepared.borrow().len(), 1);
+            if contents == EMPTY_ZIP {
+                assert_eq!(host.system_files.borrow().len(), 1);
+                assert!(snap().notices.is_empty());
+                host.complete_system_file(Ok(()));
+            } else {
+                assert!(host.system_files.borrow().is_empty());
+                let notice = snap().notices.pop().unwrap();
+                assert_eq!(notice.kind, "error");
+                assert!(!notice.body.is_empty());
+            }
+            assert_eq!(item(&source).process, Process::Running);
+            assert!(host.calls_of("stop").is_empty());
+        }
+    }
+
+    #[test]
     fn invalid_file_clicks_show_errors_without_preparing_or_stopping_a_process() {
         let host = install();
-        let (dir, source, key, _) = file_link_source(&host);
+        let (dir, source, key, _) = file_link_source(&host, b"text\n");
         let missing = tauri::Url::from_file_path(dir.path().join("missing"))
             .unwrap()
             .to_string();
@@ -873,50 +998,75 @@ mod flows {
             assert_eq!(active(), Some(source.clone()));
             let notice = snap().notices.pop().unwrap();
             assert_eq!(notice.kind, "error");
-            assert_eq!(notice.title, "Action failed");
             assert!(!notice.body.is_empty());
         }
+        assert!(host.system_files.borrow().is_empty());
         assert!(host.calls_of("stop").is_empty());
     }
 
     #[test]
-    fn file_validation_results_from_closed_removed_or_quitting_origins_are_ignored() {
-        for race in ["closing", "removed", "quitting", "restarted"] {
-            let host = install();
-            let (_dir, source, key, uri) = file_link_source(&host);
-            deliver(key, embed::HostEvent::OpenFile(&uri));
-            assert_eq!(host.pending_files(), 1);
-            match race {
-                "closing" => {
-                    close(&source, true).unwrap();
+    fn stale_file_classification_results_cannot_launch_open_or_report_errors() {
+        for route in ["text", "system", "reveal", "invalid"] {
+            for race in ["closing", "removed", "quitting", "restarted"] {
+                let host = install();
+                let (dir, source, key, uri) = file_link_source(
+                    &host,
+                    if route == "text" {
+                        b"text\n"
+                    } else {
+                        EMPTY_ZIP
+                    },
+                );
+                let uri = match route {
+                    "invalid" => "file://remote.example/etc/passwd".into(),
+                    "reveal" => jar_uri(dir.path()),
+                    _ => uri,
+                };
+                deliver(key, embed::HostEvent::OpenFile(&uri));
+                assert_eq!(host.pending_files(), 1);
+                match race {
+                    "closing" => {
+                        close(&source, true).unwrap();
+                    }
+                    "removed" => {
+                        close(&source, true).unwrap();
+                        host.exit(key, Some(0));
+                    }
+                    "quitting" => {
+                        quit_snapshot().unwrap();
+                    }
+                    "restarted" => {
+                        host.exit(key, Some(7));
+                        let (tool, cwd, project, conversation, extra) =
+                            restart_target(&source).unwrap();
+                        let restarted = begin_launch(
+                            tool,
+                            cwd,
+                            project,
+                            conversation,
+                            None,
+                            Some(source),
+                            extra,
+                        )
+                        .unwrap();
+                        host.complete(&restarted);
+                    }
+                    _ => unreachable!(),
                 }
-                "removed" => {
-                    close(&source, true).unwrap();
-                    host.exit(key, Some(0));
-                }
-                "quitting" => {
-                    quit_snapshot().unwrap();
-                }
-                "restarted" => {
-                    host.exit(key, Some(7));
-                    let (tool, cwd, project, conversation, extra) =
-                        restart_target(&source).unwrap();
-                    let restarted =
-                        begin_launch(tool, cwd, project, conversation, None, Some(source), extra)
-                            .unwrap();
-                    host.complete(&restarted);
-                }
-                _ => unreachable!(),
+                let prepared = host.prepared.borrow().len();
+                let before = ids();
+                let selected = active();
+                host.complete_file();
+                assert_eq!(ids(), before, "{race}");
+                assert_eq!(active(), selected, "{race}");
+                assert_eq!(host.prepared.borrow().len(), prepared, "{race}");
+                assert!(host.system_files.borrow().is_empty(), "{race}");
+                assert!(host.revealed_files.borrow().is_empty(), "{race}");
+                assert!(
+                    snap().notices.iter().all(|notice| notice.kind != "error"),
+                    "{race}"
+                );
             }
-            let prepared = host.prepared.borrow().len();
-            let before = ids();
-            host.complete_file();
-            assert_eq!(ids(), before, "{race}");
-            assert_eq!(host.prepared.borrow().len(), prepared, "{race}");
-            assert!(
-                snap().notices.iter().all(|notice| notice.kind != "error"),
-                "{race}"
-            );
         }
     }
 
@@ -924,7 +1074,7 @@ mod flows {
     fn stale_queued_file_events_do_not_start_validation() {
         for race in ["closing", "removed", "quitting", "unknown-key"] {
             let host = install();
-            let (_dir, source, key, uri) = file_link_source(&host);
+            let (_dir, source, key, uri) = file_link_source(&host, b"text\n");
             match race {
                 "closing" => {
                     close(&source, true).unwrap();
@@ -947,36 +1097,69 @@ mod flows {
             assert_eq!(host.pending_files(), 0, "{race}");
             assert_eq!(host.prepared.borrow().len(), 1, "{race}");
             assert!(snap().notices.is_empty(), "{race}");
+            assert!(host.system_files.borrow().is_empty(), "{race}");
         }
     }
 
     #[test]
-    fn retained_exited_output_keeps_file_links_usable_even_during_validation() {
-        for exits_before_click in [false, true] {
-            let host = install();
-            let (_dir, source, key, uri) = file_link_source(&host);
-            if exits_before_click {
-                host.exit(key, Some(7));
+    fn retained_exited_output_keeps_all_file_routes_usable_even_during_classification() {
+        for route in ["text", "system", "reveal"] {
+            for exits_before_click in [false, true] {
+                let host = install();
+                let (dir, source, key, uri) = file_link_source(
+                    &host,
+                    if route == "text" {
+                        b"text\n"
+                    } else {
+                        EMPTY_ZIP
+                    },
+                );
+                let uri = if route == "reveal" {
+                    jar_uri(dir.path())
+                } else {
+                    uri
+                };
+                if exits_before_click {
+                    host.exit(key, Some(7));
+                }
+                deliver(key, embed::HostEvent::OpenFile(&uri));
+                if !exits_before_click {
+                    host.exit(key, Some(7));
+                }
+                host.complete_file();
+                assert_eq!(item(&source).process, Process::Exited);
+                if route != "text" {
+                    assert_eq!(ids(), vec![source.clone()]);
+                    assert_eq!(active(), Some(source));
+                    assert_eq!(host.prepared.borrow().len(), 1);
+                    if route == "reveal" {
+                        assert!(host.system_files.borrow().is_empty());
+                        assert_eq!(host.revealed_files.borrow().len(), 1);
+                        host.complete_reveal_file(Ok(()));
+                    } else {
+                        assert!(host.revealed_files.borrow().is_empty());
+                        assert_eq!(host.system_files.borrow().len(), 1);
+                        host.complete_system_file(Ok(()));
+                    }
+                } else {
+                    let editor = active().unwrap();
+                    assert_ne!(editor, source);
+                    assert_eq!(item(&editor).tool, "neovim");
+                    assert_eq!(item(&editor).cwd, item(&source).cwd);
+                    host.complete(&editor);
+                    assert_eq!(item(&editor).process, Process::Running);
+                    assert!(host.system_files.borrow().is_empty());
+                    assert!(host.revealed_files.borrow().is_empty());
+                }
+                assert!(host.calls_of("stop").is_empty());
             }
-            deliver(key, embed::HostEvent::OpenFile(&uri));
-            if !exits_before_click {
-                host.exit(key, Some(7));
-            }
-            host.complete_file();
-            let editor = active().unwrap();
-            assert_ne!(editor, source);
-            assert_eq!(item(&source).process, Process::Exited);
-            assert_eq!(item(&editor).tool, "neovim");
-            assert_eq!(item(&editor).cwd, item(&source).cwd);
-            host.complete(&editor);
-            assert_eq!(item(&editor).process, Process::Running);
         }
     }
 
     #[test]
     fn accepted_file_open_is_an_independent_sibling_if_origin_closes_during_preparation() {
         let host = install();
-        let (_dir, source, key, uri) = file_link_source(&host);
+        let (_dir, source, key, uri) = file_link_source(&host, b"text\n");
         deliver(key, embed::HostEvent::OpenFile(&uri));
         host.complete_file();
         let editor = active().unwrap();
@@ -993,7 +1176,7 @@ mod flows {
     #[test]
     fn file_open_uses_normal_missing_neovim_failure_and_preserves_file_args_on_restart() {
         let host = install();
-        let (_dir, source, key, uri) = file_link_source(&host);
+        let (_dir, source, key, uri) = file_link_source(&host, b"text\n");
         deliver(key, embed::HostEvent::OpenFile(&uri));
         host.complete_file();
         let editor = active().unwrap();

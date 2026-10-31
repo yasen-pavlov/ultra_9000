@@ -17,6 +17,7 @@ url='https://github.com/yasen-pavlov/ultra_9000'
 license=('MIT OR Apache-2.0')
 # Every library the binary links directly, plus librsvg, libxkbcommon, mesa (EGL) and
 # wayland, which it loads at runtime (namcap reports those four as possibly unneeded).
+# xdg-utils supplies the desktop opener for file links and the config directory.
 depends=(
   'cairo'
   'dbus'
@@ -35,6 +36,7 @@ depends=(
   'pango'
   'wayland'
   'webkit2gtk-4.1'
+  'xdg-utils'
 )
 makedepends=('bun' 'cargo' 'git')
 # !lto: makepkg's C LTO flags do not mix with rustc-linked objects of the -sys crates.
