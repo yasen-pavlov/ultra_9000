@@ -2,12 +2,17 @@ use super::*;
 use std::{io::Write, os::unix::fs::symlink};
 use tempfile::TempDir;
 
+fn read_document(path: &Path, follow: bool, at: u64) -> Loaded {
+    let (path, project) = locate(path, &[]).unwrap();
+    open(&path, &project, follow, at).unwrap()
+}
+
 #[test]
 fn bounded_reads_status_and_successful_revisions() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("report.MD");
     fs::write(&path, "# Report\n").unwrap();
-    let mut file = open(&path, dir.path(), true, 10).unwrap();
+    let mut file = read_document(&path, true, 10);
     assert_eq!(file.state.status, DocumentStatus::Ok);
     assert_eq!(file.state.revision, 1);
     assert!(file.state.follow);
@@ -22,7 +27,7 @@ fn bounded_reads_status_and_successful_revisions() {
     file.reload(20, false);
     assert_eq!(file.state.status, DocumentStatus::TooLarge);
     assert_eq!(file.state.revision, 1);
-    assert_eq!(file.text.as_ref(), "# Report\n");
+    assert!(file.text.is_empty());
     fs::write(&path, [0xff, 0xfe]).unwrap();
     file.reload(30, false);
     assert_eq!(file.state.status, DocumentStatus::Unreadable);
@@ -143,10 +148,10 @@ fn real_directory_watch_reports_update_replace_missing_and_return() {
     })
     .unwrap();
     manager
-        .watch("a".into(), open(&path, dir.path(), false, 1).unwrap())
+        .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
     manager
-        .watch("b".into(), open(&second, dir.path(), false, 1).unwrap())
+        .watch("b".into(), read_document(&second, false, 1))
         .unwrap();
     assert_eq!(manager.directories.len(), 1);
     manager.due(
@@ -196,7 +201,7 @@ fn missing_grace_keeps_atomic_saves_ok_with_injected_clock() {
     fs::write(&path, "first").unwrap();
     let mut manager = Manager::new(|_| {}).unwrap();
     manager
-        .watch("a".into(), open(&path, dir.path(), false, 1).unwrap())
+        .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
     let baseline = Instant::now() + COALESCE;
     manager.due(baseline, 1, |_, _| {});
@@ -263,7 +268,7 @@ fn directory_watch_recovers_when_the_parent_directory_returns() {
     })
     .unwrap();
     manager
-        .watch("a".into(), open(&path, &parent, false, 1).unwrap())
+        .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
     manager.due(
         Instant::now() + COALESCE,
@@ -302,7 +307,7 @@ fn absent_watcher_keeps_last_text_and_polls_for_updates() {
     fs::write(&path, "before").unwrap();
     let mut manager = Manager::from_watcher(None);
     manager
-        .watch("a".into(), open(&path, dir.path(), false, 1).unwrap())
+        .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
     assert_eq!(manager.directories.len(), 1);
     assert!(manager
@@ -327,7 +332,7 @@ fn watch_registration_error_still_inserts_readable_document() {
     fs::create_dir(&parent).unwrap();
     let path = parent.join("a.md");
     fs::write(&path, "kept").unwrap();
-    let loaded = open(&path, &parent, false, 1).unwrap();
+    let loaded = read_document(&path, false, 1);
     fs::remove_dir_all(&parent).unwrap();
     let mut manager = Manager::new(|_| {}).unwrap();
     assert!(manager.watch("a".into(), loaded).is_err());
@@ -355,7 +360,7 @@ fn trailing_debounce_waits_for_quiet_but_caps_a_continuous_burst() {
     fs::write(&path, "before").unwrap();
     let mut manager = Manager::new(|_| {}).unwrap();
     manager
-        .watch("a".into(), open(&path, dir.path(), false, 1).unwrap())
+        .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
     let at = Instant::now();
     fs::write(&path, "after").unwrap();
@@ -389,7 +394,7 @@ fn incomplete_utf8_tail_keeps_previous_text_and_rearms() {
     fs::write(&path, "before").unwrap();
     let mut manager = Manager::new(|_| {}).unwrap();
     manager
-        .watch("a".into(), open(&path, dir.path(), false, 1).unwrap())
+        .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
     let at = Instant::now();
     let previous = manager.files["a"].loaded.state.clone();
@@ -412,7 +417,7 @@ fn identical_and_metadata_only_reads_keep_revision_event_and_arc() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("a.md");
     fs::write(&path, "same").unwrap();
-    let mut loaded = open(&path, dir.path(), false, 1).unwrap();
+    let mut loaded = read_document(&path, false, 1);
     let previous = loaded.state.clone();
     let text = loaded.text.clone();
     loaded.reload(2, false);
@@ -433,8 +438,15 @@ fn identical_and_metadata_only_reads_keep_revision_event_and_arc() {
     fs::write(&replacement, "same").unwrap();
     fs::rename(replacement, &path).unwrap();
     loaded.reload(4, false);
+    assert_eq!(loaded.state.revision, previous.revision);
+    assert_eq!(loaded.state.last_event, previous.last_event);
+    assert_eq!(loaded.state.last_event_at_ms, previous.last_event_at_ms);
+    let metadata = fs::metadata(&path).unwrap();
+    assert_eq!(loaded.identity, Some((metadata.dev(), metadata.ino())));
+    fs::write(&path, "same plus content").unwrap();
+    loaded.reload(5, true);
     assert_eq!(loaded.state.revision, previous.revision + 1);
-    assert_eq!(loaded.state.last_event, DocumentEvent::Replaced);
+    assert_eq!(loaded.state.last_event, DocumentEvent::Updated);
 }
 
 #[test]
@@ -444,7 +456,7 @@ fn missing_and_unreadable_states_serve_last_good_text_after_remount() {
     fs::write(&path, "last good").unwrap();
     let mut manager = Manager::new(|_| {}).unwrap();
     manager
-        .watch("a".into(), open(&path, dir.path(), false, 1).unwrap())
+        .watch("a".into(), read_document(&path, false, 1))
         .unwrap();
     let previous = manager.text("a").unwrap();
     fs::write(&path, b"bad\0text").unwrap();
@@ -470,7 +482,7 @@ fn nul_after_the_first_eight_kib_is_unreadable() {
     let mut text = vec![b'a'; 9000];
     text.push(0);
     fs::write(&path, text).unwrap();
-    let loaded = open(&path, dir.path(), false, 1).unwrap();
+    let loaded = read_document(&path, false, 1);
     assert_eq!(loaded.state.status, DocumentStatus::Unreadable);
     assert_eq!(loaded.state.revision, 0);
     assert!(loaded.state.error.unwrap().contains("NUL"));
@@ -592,4 +604,192 @@ fn bounded_read_mode_is_explicit_and_independent_of_the_size_limit() {
     assert!(bytes.is_empty());
     let (_, bytes) = bounded(&path, 3, true).unwrap();
     assert_eq!(bytes, b"abc");
+}
+
+#[test]
+fn a_permanently_truncated_utf8_tail_settles_after_one_event_retry() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.md");
+    fs::write(&path, "before").unwrap();
+    let mut manager = Manager::new(|_| {}).unwrap();
+    manager
+        .watch("a".into(), read_document(&path, false, 1))
+        .unwrap();
+    let at = Instant::now();
+    fs::write(&path, b"Caf\xe9").unwrap();
+    manager.event(changed(&path), at);
+    let mut reads = 0;
+    manager.due_with(
+        at + COALESCE,
+        2,
+        |_, _| panic!("first event read must be lenient"),
+        |path| {
+            reads += 1;
+            bounded(path, MAX_BYTES, false)
+        },
+    );
+    assert_eq!(manager.files["a"].loaded.state.status, DocumentStatus::Ok);
+    assert_eq!(manager.text("a").unwrap().text.as_ref(), "before");
+    assert_eq!(manager.files["a"].due, Some(at + COALESCE + COALESCE));
+    let mut states = Vec::new();
+    manager.due_with(
+        at + COALESCE + COALESCE,
+        3,
+        |_, state| states.push(state),
+        |path| {
+            reads += 1;
+            bounded(path, MAX_BYTES, false)
+        },
+    );
+    assert_eq!(reads, 2);
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].status, DocumentStatus::Unreadable);
+    assert!(manager.files["a"].due.is_none());
+    manager.due_with(
+        at + Duration::from_secs(10),
+        4,
+        |_, _| panic!("no further publish"),
+        |_| panic!("no busy read loop"),
+    );
+}
+
+#[test]
+fn explicit_reload_is_strict_and_forces_unchanged_text_to_a_new_revision() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.md");
+    fs::write(&path, "before").unwrap();
+    let mut manager = Manager::new(|_| {}).unwrap();
+    manager
+        .watch("a".into(), read_document(&path, false, 1))
+        .unwrap();
+    let original = manager.text("a").unwrap();
+    let reloaded = manager.reload("a").unwrap();
+    assert_eq!(reloaded.revision, original.revision + 1);
+    assert_eq!(reloaded.status, DocumentStatus::Ok);
+    assert!(Arc::ptr_eq(
+        &original.text,
+        &manager.text("a").unwrap().text
+    ));
+    assert!(manager.files["a"].due.is_none());
+    fs::write(&path, b"Caf\xe9").unwrap();
+    let unreadable = manager.reload("a").unwrap();
+    assert_eq!(unreadable.status, DocumentStatus::Unreadable);
+    assert!(unreadable.error.is_some());
+    assert!(
+        manager.files["a"].due.is_none(),
+        "explicit retry must not re-arm invalid UTF-8"
+    );
+    fs::write(&path, "before").unwrap();
+    let recovered = manager.reload("a").unwrap();
+    assert_eq!(recovered.status, DocumentStatus::Ok);
+    assert!(recovered.error.is_none());
+    assert_eq!(recovered.revision, reloaded.revision + 1);
+}
+
+#[test]
+fn too_large_drops_and_refuses_text_then_reloads_an_empty_file() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.md");
+    fs::write(&path, "before").unwrap();
+    let mut manager = Manager::new(|_| {}).unwrap();
+    manager
+        .watch("a".into(), read_document(&path, false, 1))
+        .unwrap();
+    let previous = manager.text("a").unwrap();
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_BYTES + 1)
+        .unwrap();
+    assert_eq!(
+        manager.reload("a").unwrap().status,
+        DocumentStatus::TooLarge
+    );
+    assert!(manager.files["a"].loaded.text.is_empty());
+    assert_eq!(
+        Arc::strong_count(&previous.text),
+        1,
+        "native no longer pins the last good body"
+    );
+    assert!(manager.text("a").is_err());
+    fs::write(&path, "").unwrap();
+    let at = Instant::now();
+    manager.event(changed(&path), at);
+    manager.due(at + COALESCE, 3, |_, _| {});
+    let empty = manager.text("a").unwrap();
+    assert_eq!(empty.revision, previous.revision + 1);
+    assert!(empty.text.is_empty());
+}
+
+#[test]
+fn open_consumes_the_located_identity_without_revalidating_the_path() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.md");
+    fs::write(&path, "before").unwrap();
+    let (canonical, project) = locate(&path, &[]).unwrap();
+    fs::remove_file(path).unwrap();
+    let loaded = open(&canonical, &project, false, 1).unwrap();
+    assert_eq!(loaded.state.path, canonical.to_string_lossy());
+    assert_eq!(loaded.state.status, DocumentStatus::Missing);
+    assert_eq!(loaded.state.revision, 0);
+}
+
+#[test]
+fn unchanged_polling_skips_body_reads_but_events_still_read() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.md");
+    fs::write(&path, "before").unwrap();
+    let mut manager = Manager::from_watcher(None);
+    manager
+        .watch("a".into(), read_document(&path, false, 1))
+        .unwrap();
+    let at = Instant::now() + COALESCE;
+    let mut reads = 0;
+    for tick in 0..3 {
+        manager.due_with(
+            at + MISSING_GRACE * tick,
+            2,
+            |_, _| panic!("unchanged poll"),
+            |path| {
+                reads += 1;
+                bounded(path, MAX_BYTES, false)
+            },
+        );
+    }
+    assert_eq!(reads, 0);
+    fs::write(&path, "after the poll").unwrap();
+    manager.due_with(
+        at + MISSING_GRACE * 3,
+        3,
+        |_, _| {},
+        |path| {
+            reads += 1;
+            bounded(path, MAX_BYTES, false)
+        },
+    );
+    assert_eq!(reads, 1);
+    assert_eq!(manager.text("a").unwrap().text.as_ref(), "after the poll");
+    manager.due_with(
+        at + MISSING_GRACE * 4,
+        4,
+        |_, _| panic!("unchanged poll"),
+        |path| {
+            reads += 1;
+            bounded(path, MAX_BYTES, false)
+        },
+    );
+    assert_eq!(reads, 1);
+    let event_at = at + MISSING_GRACE * 4 + COALESCE;
+    manager.event(changed(&path), event_at);
+    manager.due_with(
+        event_at + COALESCE,
+        5,
+        |_, _| panic!("same event content"),
+        |path| {
+            reads += 1;
+            bounded(path, MAX_BYTES, false)
+        },
+    );
+    assert_eq!(reads, 2);
 }

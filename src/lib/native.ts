@@ -24,7 +24,7 @@ export interface DocumentState {
   status: DocumentStatus;
   /** Read or decoding error text, only while status is "unreadable". */
   error: string | null;
-  /** Bumps when the readable text or file identity changes; fetch text when it changes. */
+  /** Bumps when readable text changes or on explicit reload; fetch text when it changes. */
   revision: number;
   lastEvent: DocumentEvent;
   lastEventAtMs: number;

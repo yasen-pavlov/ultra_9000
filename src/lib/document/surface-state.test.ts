@@ -26,4 +26,10 @@ describe("document text fetching", () => {
     expect(acceptsText(4, 5)).toBe(false);
     expect(acceptsText(5, 5)).toBe(false);
   });
+
+  it("fetches again after an explicit reload, even when the revision did not change", () => {
+    expect(wantsText({ status: "ok", revision: 1 }, 1, true, true)).toBe(true);
+    expect(wantsText({ status: "ok", revision: 1 }, 1, false, true)).toBe(false);
+    expect(wantsText({ status: "too-large", revision: 1 }, 1, true, true)).toBe(false);
+  });
 });

@@ -2660,11 +2660,17 @@ mod document_flows {
         if !path.exists() {
             std::fs::write(&path, "# Report\n").unwrap();
         }
-        let loaded = documents::open(&path, dir.path(), false, now()).unwrap();
-        open_document(loaded, dir.path().to_string_lossy().into_owned(), select).unwrap()
+        let (path, project) = documents::locate(&path, &[]).unwrap();
+        let loaded = documents::open(&path, &project, false, now()).unwrap();
+        open_document(loaded, project.to_string_lossy().into_owned(), select).unwrap()
     }
     fn launch(dir: &TempDir, tool: &str, anchor: Option<String>) -> String {
-        let root = dir.path().to_string_lossy().into_owned();
+        let root = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         begin_launch(tool.into(), root.clone(), root, None, anchor, None, None).unwrap()
     }
     #[test]

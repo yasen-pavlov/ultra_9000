@@ -4,14 +4,20 @@
 import type { DocumentState } from "../native";
 
 /**
- * Fetch when the surface is visible and native read something newer than what was fetched. A
- * missing or unreadable file still serves its last good text (revision > 0); a too-large file has
- * none.
+ * Fetch when the surface is visible and native read something newer than what was fetched, or
+ * after an explicit reload (`r`, Retry) even at the same revision: native keeps the revision of an
+ * unchanged file, so a failed fetch would otherwise never be retried. A missing or unreadable file
+ * still serves its last good text (revision > 0); a too-large file has none.
  */
-export function wantsText(doc: Pick<DocumentState, "status" | "revision">, fetched: number, visible: boolean): boolean {
+export function wantsText(
+  doc: Pick<DocumentState, "status" | "revision">,
+  fetched: number,
+  visible: boolean,
+  forced = false,
+): boolean {
   if (!visible || doc.status === "too-large") return false;
   if (doc.status !== "ok" && doc.revision === 0) return false;
-  return doc.revision > fetched;
+  return forced || doc.revision > fetched;
 }
 
 /** A reply is shown only when it is newer than the text on screen, whatever order replies arrive in. */

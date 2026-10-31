@@ -18,6 +18,8 @@ interface Props {
 
 let texts: Record<number, string>;
 let served: number;
+/** document_text calls still to fail, as a worker timeout would. */
+let failText: number;
 let calls: { cmd: string; args: unknown }[];
 let writeText: ReturnType<typeof vi.fn>;
 let mounted: Record<string, unknown> | null = null;
@@ -26,6 +28,7 @@ let target: HTMLElement;
 beforeEach(() => {
   texts = {};
   served = 1;
+  failText = 0;
   calls = [];
   documentSessions.retain(new Set());
   vi.stubGlobal("matchMedia", () => ({ matches: false }));
@@ -45,7 +48,13 @@ beforeEach(() => {
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   mockIPC((cmd, args) => {
     calls.push({ cmd, args });
-    if (cmd === "document_text") return { revision: served, text: texts[served] ?? "" };
+    if (cmd === "document_text") {
+      if (failText > 0) {
+        failText -= 1;
+        throw new Error("document worker busy");
+      }
+      return { revision: served, text: texts[served] ?? "" };
+    }
     return null;
   });
   target = document.createElement("div");
@@ -129,6 +138,19 @@ describe("what the surface shows", () => {
     await until(() => prose().textContent?.includes("The last version read.") === true);
     expect(target.querySelector(".notice")?.textContent).toContain("No longer at this path");
     expect(textCalls()).toBe(1);
+  });
+
+  it("recovers a failed fetch with Retry even though the file and its revision did not change", async () => {
+    texts[1] = "# Report\n\nRecovered text.";
+    failText = 1;
+    show({ itemId: "d1", title: "a.md", doc: documentState({ revision: 1 }), presentationEpoch: 1 });
+    await until(() => target.querySelector(".notice.err") !== null);
+    expect(target.querySelector(".notice.err")?.textContent).toContain("document worker busy");
+    const retry = [...target.querySelectorAll(".notice button")].find((button) => button.textContent === "Retry");
+    click(retry as HTMLElement);
+    await until(() => prose().textContent?.includes("Recovered text.") === true);
+    expect(target.querySelector(".notice.err")).toBeNull();
+    expect(calls.map((call) => call.cmd)).toEqual(["document_text", "document_reload", "document_text"]);
   });
 });
 

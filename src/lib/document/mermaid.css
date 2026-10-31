@@ -1,0 +1,216 @@
+/* Diagram styles owned by the app (mermaid.ts strips every style sheet Mermaid emits). Scoped to the
+   reader's diagram figures; colours are the app tokens (app.css) and the terminal palette, and
+   orange never appears. Covers Mermaid's standard classes: flowchart nodes, clusters, edges and
+   labels, sequence, state, class, ER, pie and gantt basics. */
+
+.prose .diagram svg {
+  font-family: var(--ui);
+  font-size: 13px;
+  color: var(--text);
+}
+.prose .diagram svg text,
+.prose .diagram svg tspan {
+  fill: var(--text);
+  stroke: none;
+}
+
+/* Flowchart, state and generic nodes */
+.prose .diagram .node rect,
+.prose .diagram .node circle,
+.prose .diagram .node ellipse,
+.prose .diagram .node polygon,
+.prose .diagram .node path,
+.prose .diagram .basic.label-container {
+  fill: #2b2b2b;
+  stroke: var(--outline);
+  stroke-width: 1px;
+}
+.prose .diagram .node .label text,
+.prose .diagram .nodeLabel,
+.prose .diagram .label text {
+  fill: var(--hi);
+}
+.prose .diagram .cluster rect {
+  fill: var(--well);
+  stroke: var(--line);
+  stroke-width: 1px;
+}
+.prose .diagram .cluster text,
+.prose .diagram .cluster-label text {
+  fill: var(--dim);
+}
+
+/* Edges and their labels */
+.prose .diagram .flowchart-link,
+.prose .diagram .edgePath .path,
+.prose .diagram path.path,
+.prose .diagram .transition,
+.prose .diagram .relation,
+.prose .diagram .relationshipLine {
+  stroke: var(--dim);
+  stroke-width: 1.5px;
+  fill: none;
+}
+.prose .diagram marker path,
+.prose .diagram .arrowheadPath,
+.prose .diagram .arrowMarkerPath {
+  fill: var(--dim);
+  stroke: var(--dim);
+}
+.prose .diagram .edgeLabel rect,
+.prose .diagram .labelBkg {
+  fill: var(--panel);
+  opacity: 1;
+}
+.prose .diagram .edgeLabel text {
+  fill: var(--text);
+}
+
+/* Sequence diagrams */
+.prose .diagram rect.actor,
+.prose .diagram .actor-box,
+.prose .diagram .labelBox {
+  fill: #2b2b2b;
+  stroke: var(--outline);
+}
+.prose .diagram text.actor > tspan,
+.prose .diagram .labelText,
+.prose .diagram .labelText > tspan {
+  fill: var(--hi);
+}
+.prose .diagram .actor-line {
+  stroke: var(--line);
+}
+.prose .diagram .messageLine0,
+.prose .diagram .messageLine1 {
+  stroke: var(--dim);
+  stroke-width: 1.5px;
+}
+.prose .diagram .messageText {
+  fill: var(--text);
+}
+.prose .diagram #arrowhead path,
+.prose .diagram .sequenceNumber {
+  fill: var(--dim);
+}
+.prose .diagram .note,
+.prose .diagram .state-note {
+  fill: #262014;
+  stroke: #5e4c22;
+}
+.prose .diagram .noteText,
+.prose .diagram .noteText > tspan {
+  fill: var(--text);
+}
+.prose .diagram .loopLine {
+  stroke: var(--outline);
+  stroke-dasharray: 2 2;
+}
+.prose .diagram .loopText,
+.prose .diagram .loopText > tspan {
+  fill: var(--dim);
+}
+.prose .diagram .activation0,
+.prose .diagram .activation1,
+.prose .diagram .activation2 {
+  fill: var(--sel);
+  stroke: var(--outline);
+}
+
+/* State diagrams */
+.prose .diagram .stateGroup rect,
+.prose .diagram g.stateGroup rect {
+  fill: #2b2b2b;
+  stroke: var(--outline);
+}
+.prose .diagram .node circle.state-start,
+.prose .diagram .node .fork-join,
+.prose .diagram .state-start {
+  fill: var(--text);
+  stroke: var(--text);
+}
+.prose .diagram .node circle.state-end,
+.prose .diagram .state-end {
+  fill: var(--panel);
+  stroke: var(--text);
+}
+
+/* Class and ER diagrams */
+.prose .diagram g.classGroup rect,
+.prose .diagram .classLabel .box,
+.prose .diagram .entityBox {
+  fill: #2b2b2b;
+  stroke: var(--outline);
+}
+.prose .diagram g.classGroup line,
+.prose .diagram .divider {
+  stroke: var(--outline);
+}
+.prose .diagram .relationshipLabelBox {
+  fill: var(--panel);
+}
+
+/* Pie charts (slice colours come from the theme variables) */
+.prose .diagram .pieCircle {
+  stroke: var(--panel);
+  stroke-width: 1px;
+}
+.prose .diagram .pieOuterCircle {
+  stroke: var(--outline);
+  fill: none;
+}
+.prose .diagram .pieTitleText,
+.prose .diagram .legend text {
+  fill: var(--text);
+}
+.prose .diagram .slice {
+  fill: var(--panel);
+}
+
+/* Gantt charts */
+.prose .diagram .grid .tick line {
+  stroke: var(--line);
+}
+.prose .diagram .grid .tick text,
+.prose .diagram .sectionTitle,
+.prose .diagram .titleText {
+  fill: var(--dim);
+}
+.prose .diagram .section0,
+.prose .diagram .section2 {
+  fill: var(--well);
+}
+.prose .diagram .section1,
+.prose .diagram .section3 {
+  fill: var(--panel);
+}
+.prose .diagram .task,
+.prose .diagram .task0,
+.prose .diagram .task1,
+.prose .diagram .task2,
+.prose .diagram .task3 {
+  fill: #2f3d5a;
+  stroke: var(--blue);
+}
+.prose .diagram .done0,
+.prose .diagram .done1,
+.prose .diagram .done2,
+.prose .diagram .done3 {
+  fill: #2b3a22;
+  stroke: var(--green);
+}
+.prose .diagram .crit0,
+.prose .diagram .crit1,
+.prose .diagram .crit2,
+.prose .diagram .crit3 {
+  fill: #3a1820;
+  stroke: var(--err);
+}
+.prose .diagram .taskText,
+.prose .diagram .taskTextOutsideRight,
+.prose .diagram .taskTextOutsideLeft {
+  fill: var(--hi);
+}
+.prose .diagram .today {
+  stroke: var(--purple);
+}

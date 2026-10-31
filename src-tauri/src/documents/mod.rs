@@ -9,7 +9,7 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{mpsc, Arc, LazyLock, Mutex},
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -93,6 +93,25 @@ pub struct Loaded {
     pub state: DocumentState,
     text: Arc<str>,
     identity: Option<(u64, u64)>,
+    stamp: Option<FileStamp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+impl FileStamp {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
 }
 fn modified(meta: &Metadata) -> u64 {
     meta.modified()
@@ -157,17 +176,9 @@ pub fn locate(path: &Path, roots: &[PathBuf]) -> Result<(PathBuf, PathBuf), Loca
     }
     Ok((path, project))
 }
+/// Read the canonical document/project pair returned by `locate`.
 pub fn open(path: &Path, project: &Path, follow: bool, at: u64) -> Result<Loaded, String> {
-    let path = fs::canonicalize(path).map_err(|e| e.to_string())?;
-    if !is_markdown(&path) {
-        return Err("Only Markdown documents (.md or .markdown) can be viewed.".into());
-    }
-    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("Document must be a regular file.".into());
-    }
     let parent = path.parent().ok_or("Document has no directory.")?;
-    let project = fs::canonicalize(project).map_err(|error| error.to_string())?;
     let relative = parent
         .strip_prefix(project)
         .map_err(|_| "Document is outside its project.")?;
@@ -185,36 +196,38 @@ pub fn open(path: &Path, project: &Path, follow: bool, at: u64) -> Result<Loaded
             revision: 0,
             last_event: DocumentEvent::Opened,
             last_event_at_ms: at,
-            modified_ms: modified(&meta),
-            size_bytes: meta.len(),
+            modified_ms: 0,
+            size_bytes: 0,
             live_until_ms: 0,
             follow,
         },
         text: Arc::from(""),
         identity: None,
+        stamp: None,
     };
     loaded.reload(at, true);
-    loaded.state.live_until_ms = loaded.state.modified_ms.saturating_add(5000);
     Ok(loaded)
 }
 impl Loaded {
-    fn reload(&mut self, at: u64, initial: bool) {
+    fn reload(&mut self, at: u64, strict: bool) {
         let result = bounded(Path::new(&self.state.path), MAX_BYTES, false);
-        self.apply_read(at, initial, result);
+        self.apply_read(at, strict, false, result);
     }
     fn apply_read(
         &mut self,
         at: u64,
-        initial: bool,
+        strict: bool,
+        force: bool,
         result: std::io::Result<(Metadata, Vec<u8>)>,
     ) -> ReadOutcome {
         match result {
             Ok((meta, bytes)) => {
                 let identity = (meta.dev(), meta.ino());
-                let event = if initial {
-                    DocumentEvent::Opened
-                } else if self.state.status == DocumentStatus::Missing {
+                let stamp = FileStamp::from_metadata(&meta);
+                let event = if self.state.status == DocumentStatus::Missing {
                     DocumentEvent::Returned
+                } else if self.state.revision == 0 {
+                    DocumentEvent::Opened
                 } else if self.identity.is_some_and(|old| old != identity)
                     || meta.len() < self.state.size_bytes
                 {
@@ -225,6 +238,10 @@ impl Loaded {
                 if meta.len() > MAX_BYTES || bytes.len() as u64 > MAX_BYTES {
                     let changed = self.state.status != DocumentStatus::TooLarge
                         || self.state.size_bytes != meta.len();
+                    self.stamp = Some(stamp);
+                    if !self.text.is_empty() {
+                        self.text = Arc::from("");
+                    }
                     if changed {
                         self.state.status = DocumentStatus::TooLarge;
                         self.state.error = None;
@@ -240,17 +257,21 @@ impl Loaded {
                 } else {
                     match String::from_utf8(bytes) {
                         Ok(text) => Ok(text),
-                        Err(error) if !initial && error.utf8_error().error_len().is_none() => {
-                            return ReadOutcome::Incomplete
+                        Err(error) if !strict && error.utf8_error().error_len().is_none() => {
+                            self.stamp = None;
+                            return ReadOutcome::Incomplete;
                         }
                         Err(error) => Err(error.to_string()),
                     }
                 };
+                self.stamp = Some(stamp);
                 match decoded {
                     Ok(text) => {
-                        let same = self.state.revision > 0
-                            && self.identity == Some(identity)
-                            && self.text.as_ref() == text;
+                        let unchanged_text = self.text.as_ref() == text;
+                        let same = !force
+                            && self.state.revision > 0
+                            && self.state.status != DocumentStatus::TooLarge
+                            && unchanged_text;
                         let status_changed =
                             self.state.status != DocumentStatus::Ok || self.state.error.is_some();
                         let modified = modified(&meta);
@@ -261,7 +282,9 @@ impl Loaded {
                             || self.state.size_bytes != meta.len()
                             || self.state.live_until_ms != live_until;
                         if !same {
-                            self.text = Arc::from(text);
+                            if !unchanged_text {
+                                self.text = Arc::from(text);
+                            }
                             self.state.revision += 1;
                         }
                         if !same || status_changed {
@@ -292,6 +315,7 @@ impl Loaded {
                 }
             }
             Err(error) => {
+                self.stamp = None;
                 let (status, error) = if error.kind() == std::io::ErrorKind::NotFound {
                     (DocumentStatus::Missing, None)
                 } else {
@@ -646,11 +670,17 @@ impl Manager {
                 d.saturating_duration_since(at)
             })
     }
-    pub fn due(
+    pub fn due(&mut self, instant: Instant, now: u64, publish: impl FnMut(String, DocumentState)) {
+        self.due_with(instant, now, publish, |path| {
+            bounded(path, MAX_BYTES, false)
+        });
+    }
+    fn due_with(
         &mut self,
         instant: Instant,
         now: u64,
         mut publish: impl FnMut(String, DocumentState),
+        mut read: impl FnMut(&Path) -> std::io::Result<(Metadata, Vec<u8>)>,
     ) {
         let watcher = &mut self.watcher;
         self.unwatched.retain(|directory| {
@@ -666,15 +696,26 @@ impl Manager {
                 continue;
             }
             file.due = None;
-            file.first_event = None;
+            let event_driven = file.first_event.take().is_some();
             let directory = Path::new(&file.loaded.state.path).parent().unwrap();
             if !directory.is_dir() {
                 self.unwatched.insert(directory.to_owned());
             }
-            if self.unwatched.contains(directory) {
+            let polling = self.unwatched.contains(directory);
+            if polling {
                 file.due = Some(instant + MISSING_GRACE);
             }
-            let result = bounded(Path::new(&file.loaded.state.path), MAX_BYTES, false);
+            let path = Path::new(&file.loaded.state.path);
+            if polling
+                && !event_driven
+                && fs::metadata(path).is_ok_and(|metadata| {
+                    metadata.is_file()
+                        && file.loaded.stamp == Some(FileStamp::from_metadata(&metadata))
+                })
+            {
+                continue;
+            }
+            let result = read(path);
             if result
                 .as_ref()
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
@@ -690,7 +731,7 @@ impl Manager {
             } else {
                 file.missing_since = None;
             }
-            match file.loaded.apply_read(now, false, result) {
+            match file.loaded.apply_read(now, !event_driven, false, result) {
                 ReadOutcome::Incomplete => file.due = Some(instant + COALESCE),
                 ReadOutcome::Changed => publish(id.clone(), file.loaded.state.clone()),
                 ReadOutcome::Unchanged => {}
@@ -699,7 +740,7 @@ impl Manager {
     }
     pub fn text(&self, id: &str) -> Result<DocumentText, String> {
         let file = self.files.get(id).ok_or("Document is closed.")?;
-        if file.loaded.state.revision == 0 {
+        if file.loaded.state.revision == 0 || file.loaded.state.status == DocumentStatus::TooLarge {
             return Err("Document text is unavailable.".into());
         }
         Ok(DocumentText {
@@ -709,14 +750,15 @@ impl Manager {
     }
     fn reload(&mut self, id: &str) -> Result<DocumentState, String> {
         let file = self.files.get_mut(id).ok_or("Document is closed.")?;
+        file.first_event = None;
+        file.missing_since = None;
+        file.due = self
+            .unwatched
+            .contains(Path::new(&file.loaded.state.path).parent().unwrap())
+            .then(|| Instant::now() + MISSING_GRACE);
         let result = bounded(Path::new(&file.loaded.state.path), MAX_BYTES, false);
-        if file
-            .loaded
-            .apply_read(crate::workspace::now(), false, result)
-            == ReadOutcome::Incomplete
-        {
-            file.due = Some(Instant::now() + COALESCE);
-        }
+        file.loaded
+            .apply_read(crate::workspace::now(), true, true, result);
         Ok(file.loaded.state.clone())
     }
 }

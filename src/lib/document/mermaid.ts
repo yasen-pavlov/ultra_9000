@@ -1,15 +1,20 @@
 // Mermaid diagrams, loaded on first use (never in the initial bundle). Diagrams are SVG and text
-// only: HTML labels are off and locked against `%%{init}%%` directives, sources that would bring in
-// HTML, links or images are refused before Mermaid sees them (its image shapes preload their URL
-// while rendering, so cleaning the output alone is too late), and the returned SVG is cleaned
-// again before it reaches the page. A diagram that fails or is refused falls back to its source
-// with a one-line reason (board 32).
+// only, styled by the app's own sheet (mermaid.css):
+// - before rendering, sources that could reach outside plain shapes and text are refused whole,
+//   by construct rather than spelling: extended node metadata `@{…}` (images, icons; Mermaid
+//   decodes it as YAML and preloads image URLs while rendering), `click` directives, `%%{…}%%`
+//   config, `url(`, any `<`, `href` and `javascript:`;
+// - HTML labels are off, strict security is on, and both (with theme and theme CSS) are locked
+//   against diagram config;
+// - the returned SVG loses every <style>, foreign HTML, image, link, script, handler and outside
+//   reference before it reaches the page.
+// A refused or failed diagram falls back to its source with a one-line reason (board 32).
 import type { Mermaid } from "mermaid";
 
 let loading: Promise<Mermaid> | null = null;
 let sequence = 0;
 
-/** Keys a diagram's own `%%{init}%%` must not change (Mermaid's defaults plus the label mode). */
+/** Keys a diagram's own config must not change (Mermaid's defaults, label mode, theme and its CSS). */
 export const MERMAID_SECURE_KEYS = [
   "secure",
   "securityLevel",
@@ -25,10 +30,15 @@ export const MERMAID_SECURE_KEYS = [
   "requirement",
   "mindmap",
   "block",
+  "theme",
+  "themeCSS",
+  "themeVariables",
+  "fontFamily",
 ];
 
 function load(): Promise<Mermaid> {
-  loading ??= import("mermaid").then(({ default: mermaid }) => {
+  // The app's diagram styles ship with Mermaid, so neither is in the initial bundle.
+  loading ??= Promise.all([import("mermaid"), import("./mermaid.css")]).then(([{ default: mermaid }]) => {
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "strict",
@@ -52,6 +62,15 @@ function load(): Promise<Mermaid> {
         nodeBorder: "#474747",
         clusterBkg: "#1c1c1c",
         edgeLabelBackground: "#212121",
+        // Inline slice colours: the terminal palette, never orange.
+        pie1: "#82aaff",
+        pie2: "#c792ea",
+        pie3: "#c3e88d",
+        pie4: "#89ddff",
+        pie5: "#ffcb6b",
+        pie6: "#f07178",
+        pie7: "#b2ccd6",
+        pie8: "#8c8b8b",
       },
     });
     return mermaid;
@@ -63,10 +82,15 @@ function load(): Promise<Mermaid> {
 }
 
 const REFUSED: readonly [RegExp, string][] = [
-  [/<\s*(img|image|foreignobject|script)\b/i, "HTML and images are not shown in diagrams"],
-  [/<\s*a[\s>]/i, "links are not shown in diagrams"],
-  [/javascript\s*:/i, "links are not shown in diagrams"],
-  [/@\{[^}]*\b(img|image|icon)\s*:/is, "image shapes are not shown in diagrams"],
+  [/@\{/, "node metadata (images, icons) is not shown in diagrams"],
+  [/^\s*click\s/im, "links and click actions are not shown in diagrams"],
+  [/%%\{/, "diagram config is not used in the reader"],
+  [/url\(/i, "external resources are not shown in diagrams"],
+  // A tag start only: arrows (`<-->`), class stereotypes (`<<interface>>`, the second `<` follows
+  // the first) and `x < y` stay ordinary text.
+  [/(?<!<)<[A-Za-z/!?]/, "HTML is not shown in diagrams"],
+  [/href/i, "links are not shown in diagrams"],
+  [/javascript:/i, "links are not shown in diagrams"],
 ];
 
 /** Why a source is refused before rendering, or null when it may render. */
@@ -74,27 +98,30 @@ export function refusedMermaid(source: string): string | null {
   return REFUSED.find(([pattern]) => pattern.test(source))?.[1] ?? null;
 }
 
-const DROPPED_ELEMENTS = "foreignObject, image, img, a, script, iframe, object, embed";
+const DROPPED_ELEMENTS = "style, foreignObject, image, img, a, script, iframe, object, embed";
+/** `url(` that is not a reference to a fragment of the same SVG (markers, gradients). */
+const OUTSIDE_URL = /url\(\s*(?!['"]?#)/i;
 
 /**
- * Cleans Mermaid's SVG before insertion: no foreign HTML, images, links or scripts, no event
- * handlers, references only to fragments in the same SVG, and only Mermaid's own top-level style
- * sheet (scoped to the diagram id).
+ * Cleans Mermaid's SVG before insertion: no style sheets at all (the app styles diagrams), no
+ * foreign HTML, images, links or scripts, no event handlers, and references only to fragments of
+ * the same SVG.
  */
-export function cleanMermaidSvg(svg: string, id: string): string {
+export function cleanMermaidSvg(svg: string): string {
   const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
   const root = parsed.documentElement;
   if (root.nodeName.toLowerCase() !== "svg" || parsed.getElementsByTagName("parsererror").length > 0) return "";
   for (const element of [...root.querySelectorAll(DROPPED_ELEMENTS)]) element.remove();
-  for (const style of [...root.querySelectorAll("style")]) {
-    const own = style.parentElement === root && (style.textContent ?? "").trimStart().startsWith(`#${id}`);
-    if (!own) style.remove();
-  }
   for (const element of [root, ...root.querySelectorAll("*")]) {
     for (const attribute of [...element.attributes]) {
       const name = attribute.name.toLowerCase();
       const reference = name === "href" || name === "xlink:href" || name === "src";
-      if (name.startsWith("on") || (reference && !attribute.value.startsWith("#"))) {
+      if (
+        name.startsWith("on") ||
+        (reference && !attribute.value.startsWith("#")) ||
+        OUTSIDE_URL.test(attribute.value) ||
+        /@keyframes|@import/i.test(attribute.value)
+      ) {
         element.removeAttributeNode(attribute);
       }
     }
@@ -118,7 +145,7 @@ export async function renderMermaid(source: string): Promise<{ svg: string } | {
   try {
     const mermaid = await load();
     const { svg } = await mermaid.render(id, source);
-    const clean = cleanMermaidSvg(svg, id);
+    const clean = cleanMermaidSvg(svg);
     return clean === "" ? { error: "could not render" } : { svg: clean };
   } catch (error) {
     // A failed render can leave its scratch container in the body.

@@ -95,6 +95,8 @@
   /** Revision of the newest text accepted for rendering. */
   let latestRevision = -1;
   let destroyed = false;
+  /** Set after a successful explicit reload; the next fetch ignores the revision dedupe once. */
+  let forceFetch = $state(false);
   let pendingG = false;
   let programmatic = false;
   let lastTop = 0;
@@ -149,7 +151,8 @@
   });
 
   $effect(() => {
-    if (!wantsText(doc, fetchedRevision, true)) return;
+    if (!wantsText(doc, fetchedRevision, true, forceFetch)) return;
+    forceFetch = false;
     void refresh(doc.revision);
   });
 
@@ -528,8 +531,12 @@
         void copy(doc.path);
         break;
       case "reload":
+        // `r` and Retry: native re-reads; the text is fetched again even if the revision is unchanged.
         memory.assets.clear();
-        void run("Reload", () => documentReload(itemId));
+        void run("Reload", async () => {
+          await documentReload(itemId);
+          forceFetch = true;
+        });
         break;
       case "menu":
         menuOpen = true;
