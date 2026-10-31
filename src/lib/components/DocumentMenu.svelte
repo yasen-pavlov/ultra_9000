@@ -68,15 +68,7 @@
   }
 </script>
 
-<div
-  class="menu doc-menu"
-  role="menu"
-  tabindex="-1"
-  aria-label="Document actions"
-  bind:this={list}
-  {onkeydown}
-  data-doc-overlay
->
+<div class="menu doc-menu" role="menu" tabindex="-1" aria-label="Document actions" bind:this={list} {onkeydown}>
   {#each entries as entry, index (entry.action)}
     <button
       type="button"

@@ -39,7 +39,7 @@
   }
 </script>
 
-<div class="find field" role="search" data-doc-overlay>
+<div class="find field" role="search">
   <Icon name="search" small />
   <input
     bind:this={input}

@@ -35,29 +35,17 @@ pub(super) struct FileOrigin {
 }
 
 pub(super) fn validate_origin(origin: &FileOrigin, uri: &str) -> Result<FileTarget, String> {
-    let mut target = validate(uri, &origin.cwd, origin.markdown_view)?;
-    if let FileTarget::Document(loaded, project) = &mut target {
-        let directory = std::path::Path::new(&loaded.state.path)
-            .parent()
-            .ok_or("Document has no directory.")?;
-        let roots = crate::discovery::normalize_roots(&origin.roots);
-        let root = crate::discovery::project_root(directory, &roots);
-        if !roots.is_empty() && !roots.iter().any(|prefix| root.starts_with(prefix)) {
-            return Err("Document is outside projects.roots.".into());
-        }
-        *project = root.to_string_lossy().into_owned();
-        loaded.state.dir = directory
-            .strip_prefix(&root)
-            .ok()
-            .filter(|path| !path.as_os_str().is_empty())
-            .map_or_else(|| ".".into(), |path| path.to_string_lossy().into_owned());
-    }
-    Ok(target)
+    validate(uri, &origin.cwd, origin.markdown_view, &origin.roots)
 }
 
 /// Runs off-main. URL decoding happens exactly once through Tauri's existing URL library.
 /// Query/fragment metadata is not a filename and does not become Neovim commands.
-pub(super) fn validate(uri: &str, cwd: &str, markdown_view: bool) -> Result<FileTarget, String> {
+pub(super) fn validate(
+    uri: &str,
+    cwd: &str,
+    markdown_view: bool,
+    roots: &[std::path::PathBuf],
+) -> Result<FileTarget, String> {
     let invalid = || "This file link is not a valid local file URI.".to_owned();
     let bytes = uri.as_bytes();
     for (index, byte) in bytes.iter().enumerate() {
@@ -139,7 +127,7 @@ pub(super) fn validate(uri: &str, cwd: &str, markdown_view: bool) -> Result<File
                 && !initial_executable
                 && crate::documents::is_markdown(std::path::Path::new(&path))
             {
-                return document_target(&path);
+                return document_target(&path, roots);
             }
             return Ok(uncertain_target(path));
         }
@@ -159,7 +147,7 @@ pub(super) fn validate(uri: &str, cwd: &str, markdown_view: bool) -> Result<File
             && !launcher
             && crate::documents::is_markdown(std::path::Path::new(&path)) =>
         {
-            document_target(&path)?
+            document_target(&path, roots)?
         }
         Content::Text if !launcher => {
             if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("svg")) {
@@ -176,11 +164,15 @@ pub(super) fn validate(uri: &str, cwd: &str, markdown_view: bool) -> Result<File
     })
 }
 
-fn document_target(path: &str) -> Result<FileTarget, String> {
-    let path = std::path::Path::new(path);
-    let directory = path.parent().ok_or("Document has no directory.")?;
-    let project = crate::discovery::project_root(directory, &[]);
-    let loaded = crate::documents::open(path, &project, false, crate::workspace::now())?;
+fn document_target(path: &str, roots: &[std::path::PathBuf]) -> Result<FileTarget, String> {
+    let (canonical, project) = match crate::documents::locate(std::path::Path::new(path), roots) {
+        Ok(location) => location,
+        Err(crate::documents::LocateError::OutsideRoots) => {
+            return Ok(FileTarget::Neovim(path.to_owned()))
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let loaded = crate::documents::open(&canonical, &project, false, crate::workspace::now())?;
     Ok(FileTarget::Document(
         Box::new(loaded),
         project.to_string_lossy().into_owned(),

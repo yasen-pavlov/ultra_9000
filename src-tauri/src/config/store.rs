@@ -2,9 +2,9 @@
 use super::{
     paths::ConfigPaths,
     schema::{
-        defaults, key_name, validate, IconTint, KeepAwake, SettingValue, Settings, SettingsError,
-        SettingsFile, SettingsState, Source, StatusSource, StoreKind, ToolIcon, ToolKind, ToolSpec,
-        TrayShow, WriteTarget, UI_KEYS,
+        defaults, key_name, validate, IconTint, KeepAwake, MarkdownRoute, SettingValue, Settings,
+        SettingsError, SettingsFile, SettingsState, Source, StatusSource, StoreKind, ToolIcon,
+        ToolKind, ToolSpec, TrayShow, WriteTarget, UI_KEYS,
     },
     write,
 };
@@ -656,7 +656,13 @@ fn apply_setting(s: &mut Settings, p: &[String], v: &toml::Value, sourced: bool)
         "resume.open_elsewhere_hint_seconds" => {
             s.open_elsewhere_hint_seconds = v.as_integer().unwrap() as u64
         }
-        "file_links.markdown" => s.markdown = v.as_str().unwrap().into(),
+        "file_links.markdown" => {
+            s.markdown = if v.as_str() == Some("neovim") {
+                MarkdownRoute::Neovim
+            } else {
+                MarkdownRoute::View
+            }
+        }
         "projects.pinned" => s.pinned = strings(v).into_iter().map(PathBuf::from).collect(),
         "projects.roots" => s.roots = strings(v).into_iter().map(PathBuf::from).collect(),
         "terminal.font.size" if sourced => {

@@ -70,7 +70,7 @@ Neovim uses the normal `[tools.neovim]` command and arguments and must be availa
 
 ## Documents
 
-Markdown (`.md` / `.markdown`, case-insensitive) opens in a live, read-only document surface by default. Each file has a row after its project's process rows; opening it again switches to that row. Files are watched, atomic saves do not flash a missing state, and closing never asks or changes the file. Documents have no process status and never affect tray, menu-bar or shell-plugin counts. The Open palette lists recent project documents; **Documents in this project** focuses that section. `e` (or the New Neovim shortcut) opens the current file in Neovim, reusing an editor already started for it.
+Markdown (`.md` / `.markdown`, case-insensitive) opens in a live, read-only document surface by default. Each file has a row after its project's process rows; opening it again reuses that row (selection changes only when requested). Files are watched, atomic saves do not flash a missing state, and closing never asks or changes the file. Documents have no process status and never affect tray, menu-bar or shell-plugin counts. The Open palette lists recent project documents; **Documents in this project** focuses that section. `e` (or the New Neovim shortcut) opens the current file in Neovim, reusing an editor already started for it. With `projects.roots` configured, Markdown links outside those roots retain the Neovim route.
 
 ```toml
 [file_links]

@@ -19,12 +19,12 @@ export type DocumentEvent = "opened" | "updated" | "replaced" | "missing" | "ret
 export interface DocumentState {
   /** Canonical absolute path at open time; identity. */
   path: string;
-  /** Directory relative to the project root ("." at the root); "~"-abbreviated absolute dir without a project. */
+  /** Directory relative to the project root ("." at the root). */
   dir: string;
   status: DocumentStatus;
-  /** Only for "unreadable": the OS error text. */
+  /** Read or decoding error text, only while status is "unreadable". */
   error: string | null;
-  /** Bumps on every successful read; fetch text when it changes. */
+  /** Bumps when the readable text or file identity changes; fetch text when it changes. */
   revision: number;
   lastEvent: DocumentEvent;
   lastEventAtMs: number;

@@ -8,12 +8,14 @@ use std::{
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::{mpsc, LazyLock, Mutex},
+    sync::{mpsc, Arc, LazyLock, Mutex},
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
 pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const COALESCE: Duration = Duration::from_millis(50);
+const MAX_COALESCE: Duration = Duration::from_millis(250);
+const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const MISSING_GRACE: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -38,6 +40,7 @@ pub struct DocumentState {
     pub path: String,
     pub dir: String,
     pub status: DocumentStatus,
+    /// Read or decoding error text, only while unreadable.
     pub error: Option<String>,
     pub revision: u64,
     pub last_event: DocumentEvent,
@@ -51,7 +54,7 @@ pub struct DocumentState {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentText {
     pub revision: u64,
-    pub text: String,
+    pub text: Arc<str>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,7 +91,7 @@ pub struct DocumentPreview {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Loaded {
     pub state: DocumentState,
-    text: String,
+    text: Arc<str>,
     identity: Option<(u64, u64)>,
 }
 fn modified(meta: &Metadata) -> u64 {
@@ -102,7 +105,7 @@ pub fn is_markdown(path: &Path) -> bool {
         .and_then(|s| s.to_str())
         .is_some_and(|s| s.eq_ignore_ascii_case("md") || s.eq_ignore_ascii_case("markdown"))
 }
-fn bounded(path: &Path, limit: u64) -> std::io::Result<(Metadata, Vec<u8>)> {
+fn bounded(path: &Path, limit: u64, prefix: bool) -> std::io::Result<(Metadata, Vec<u8>)> {
     let file = File::options()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
@@ -114,12 +117,45 @@ fn bounded(path: &Path, limit: u64) -> std::io::Result<(Metadata, Vec<u8>)> {
             "Document must be a regular file.",
         ));
     }
-    if limit == MAX_BYTES && meta.len() > limit {
+    if !prefix && meta.len() > limit {
         return Ok((meta, Vec::new()));
     }
-    let mut bytes = Vec::with_capacity(meta.len().min(limit + 1) as usize);
-    file.take(limit + 1).read_to_end(&mut bytes)?;
+    let read_limit = limit + u64::from(!prefix);
+    let mut bytes = Vec::with_capacity(meta.len().min(read_limit) as usize);
+    file.take(read_limit).read_to_end(&mut bytes)?;
     Ok((meta, bytes))
+}
+
+#[derive(Debug)]
+pub enum LocateError {
+    OutsideRoots,
+    Invalid(String),
+}
+impl std::fmt::Display for LocateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutsideRoots => formatter.write_str("Document is outside projects.roots."),
+            Self::Invalid(error) => formatter.write_str(error),
+        }
+    }
+}
+/// Canonical document identity and project, shared by every document entry point.
+pub fn locate(path: &Path, roots: &[PathBuf]) -> Result<(PathBuf, PathBuf), LocateError> {
+    let path = fs::canonicalize(path).map_err(|error| LocateError::Invalid(error.to_string()))?;
+    if !is_markdown(&path) || !path.is_file() {
+        return Err(LocateError::Invalid(
+            "Expected a regular Markdown file.".into(),
+        ));
+    }
+    let directory = path
+        .parent()
+        .ok_or_else(|| LocateError::Invalid("Document has no directory.".into()))?;
+    let roots = crate::discovery::normalize_roots(roots);
+    let project = crate::discovery::project_root(directory, &roots);
+    if !roots.is_empty() && !roots.iter().any(|root| project.starts_with(root)) {
+        return Err(LocateError::OutsideRoots);
+    }
+    Ok((path, project))
 }
 pub fn open(path: &Path, project: &Path, follow: bool, at: u64) -> Result<Loaded, String> {
     let path = fs::canonicalize(path).map_err(|e| e.to_string())?;
@@ -131,16 +167,15 @@ pub fn open(path: &Path, project: &Path, follow: bool, at: u64) -> Result<Loaded
         return Err("Document must be a regular file.".into());
     }
     let parent = path.parent().ok_or("Document has no directory.")?;
-    let dir = parent
+    let project = fs::canonicalize(project).map_err(|error| error.to_string())?;
+    let relative = parent
         .strip_prefix(project)
-        .map(|p| {
-            if p.as_os_str().is_empty() {
-                ".".into()
-            } else {
-                p.to_string_lossy().into_owned()
-            }
-        })
-        .unwrap_or_else(|_| parent.to_string_lossy().into_owned());
+        .map_err(|_| "Document is outside its project.")?;
+    let dir = if relative.as_os_str().is_empty() {
+        ".".into()
+    } else {
+        relative.to_string_lossy().into_owned()
+    };
     let mut loaded = Loaded {
         state: DocumentState {
             path: path.to_string_lossy().into_owned(),
@@ -155,7 +190,7 @@ pub fn open(path: &Path, project: &Path, follow: bool, at: u64) -> Result<Loaded
             live_until_ms: 0,
             follow,
         },
-        text: String::new(),
+        text: Arc::from(""),
         identity: None,
     };
     loaded.reload(at, true);
@@ -164,17 +199,21 @@ pub fn open(path: &Path, project: &Path, follow: bool, at: u64) -> Result<Loaded
 }
 impl Loaded {
     fn reload(&mut self, at: u64, initial: bool) {
-        let result = bounded(Path::new(&self.state.path), MAX_BYTES);
+        let result = bounded(Path::new(&self.state.path), MAX_BYTES, false);
         self.apply_read(at, initial, result);
     }
-    fn apply_read(&mut self, at: u64, initial: bool, result: std::io::Result<(Metadata, Vec<u8>)>) {
-        let old_status = self.state.status;
+    fn apply_read(
+        &mut self,
+        at: u64,
+        initial: bool,
+        result: std::io::Result<(Metadata, Vec<u8>)>,
+    ) -> ReadOutcome {
         match result {
             Ok((meta, bytes)) => {
                 let identity = (meta.dev(), meta.ino());
                 let event = if initial {
                     DocumentEvent::Opened
-                } else if old_status == DocumentStatus::Missing {
+                } else if self.state.status == DocumentStatus::Missing {
                     DocumentEvent::Returned
                 } else if self.identity.is_some_and(|old| old != identity)
                     || meta.len() < self.state.size_bytes
@@ -183,48 +222,109 @@ impl Loaded {
                 } else {
                     DocumentEvent::Updated
                 };
-                self.identity = Some(identity);
-                self.state.size_bytes = meta.len();
-                self.state.error = None;
-                self.state.live_until_ms = modified(&meta).saturating_add(5000);
                 if meta.len() > MAX_BYTES || bytes.len() as u64 > MAX_BYTES {
-                    self.state.status = DocumentStatus::TooLarge;
-                    self.text.clear();
+                    let changed = self.state.status != DocumentStatus::TooLarge
+                        || self.state.size_bytes != meta.len();
+                    if changed {
+                        self.state.status = DocumentStatus::TooLarge;
+                        self.state.error = None;
+                        self.state.size_bytes = meta.len();
+                        self.state.live_until_ms = modified(&meta).saturating_add(5000);
+                        self.state.last_event = event;
+                        self.state.last_event_at_ms = at;
+                    }
+                    return ReadOutcome::applied(changed);
+                }
+                let decoded = if bytes.contains(&0) {
+                    Err("File contains NUL bytes and is not UTF-8 text.".to_owned())
                 } else {
-                    let decoded = if bytes.iter().take(8192).any(|byte| *byte == 0) {
-                        Err("File contains NUL bytes and is not UTF-8 text.".to_owned())
-                    } else {
-                        String::from_utf8(bytes).map_err(|error| error.to_string())
-                    };
-                    match decoded {
-                        Ok(text) => {
-                            self.text = text;
-                            self.state.status = DocumentStatus::Ok;
+                    match String::from_utf8(bytes) {
+                        Ok(text) => Ok(text),
+                        Err(error) if !initial && error.utf8_error().error_len().is_none() => {
+                            return ReadOutcome::Incomplete
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                };
+                match decoded {
+                    Ok(text) => {
+                        let same = self.state.revision > 0
+                            && self.identity == Some(identity)
+                            && self.text.as_ref() == text;
+                        let status_changed =
+                            self.state.status != DocumentStatus::Ok || self.state.error.is_some();
+                        let modified = modified(&meta);
+                        let live_until = modified.saturating_add(5000);
+                        let changed = !same
+                            || status_changed
+                            || self.state.modified_ms != modified
+                            || self.state.size_bytes != meta.len()
+                            || self.state.live_until_ms != live_until;
+                        if !same {
+                            self.text = Arc::from(text);
                             self.state.revision += 1;
-                            self.state.modified_ms = modified(&meta);
                         }
-                        Err(error) => {
+                        if !same || status_changed {
+                            self.state.last_event = event;
+                            self.state.last_event_at_ms = at;
+                        }
+                        self.identity = Some(identity);
+                        self.state.status = DocumentStatus::Ok;
+                        self.state.error = None;
+                        self.state.modified_ms = modified;
+                        self.state.size_bytes = meta.len();
+                        self.state.live_until_ms = live_until;
+                        ReadOutcome::applied(changed)
+                    }
+                    Err(error) => {
+                        let changed = self.state.status != DocumentStatus::Unreadable
+                            || self.state.error.as_deref() != Some(error.as_str())
+                            || self.state.size_bytes != meta.len();
+                        if changed {
                             self.state.status = DocumentStatus::Unreadable;
-                            self.state.error = Some(error.to_string());
-                            self.text.clear();
+                            self.state.error = Some(error);
+                            self.state.size_bytes = meta.len();
+                            self.state.last_event = event;
+                            self.state.last_event_at_ms = at;
                         }
+                        ReadOutcome::applied(changed)
                     }
                 }
-                self.state.last_event = event;
             }
             Err(error) => {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    self.state.status = DocumentStatus::Missing;
-                    self.state.last_event = DocumentEvent::Missing;
-                    self.state.error = None;
+                let (status, error) = if error.kind() == std::io::ErrorKind::NotFound {
+                    (DocumentStatus::Missing, None)
                 } else {
-                    self.state.status = DocumentStatus::Unreadable;
-                    self.state.error = Some(error.to_string());
+                    (DocumentStatus::Unreadable, Some(error.to_string()))
+                };
+                let changed = self.state.status != status || self.state.error != error;
+                if changed {
+                    self.state.status = status;
+                    self.state.error = error;
+                    if status == DocumentStatus::Missing {
+                        self.state.last_event = DocumentEvent::Missing;
+                    }
+                    self.state.last_event_at_ms = at;
                 }
-                self.text.clear();
+                ReadOutcome::applied(changed)
             }
         }
-        self.state.last_event_at_ms = at;
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReadOutcome {
+    Changed,
+    Unchanged,
+    Incomplete,
+}
+impl ReadOutcome {
+    fn applied(changed: bool) -> Self {
+        if changed {
+            Self::Changed
+        } else {
+            Self::Unchanged
+        }
     }
 }
 pub fn asset(document: &Path, rel: &str) -> Result<DocumentAsset, String> {
@@ -242,7 +342,7 @@ pub fn asset(document: &Path, rel: &str) -> Result<DocumentAsset, String> {
     if !path.starts_with(root) {
         return Err("Image escapes the document directory.".into());
     }
-    let (meta, bytes) = bounded(&path, MAX_BYTES).map_err(|error| error.to_string())?;
+    let (meta, bytes) = bounded(&path, MAX_BYTES, false).map_err(|error| error.to_string())?;
     if meta.len() > MAX_BYTES || bytes.len() as u64 > MAX_BYTES {
         return Err("Image exceeds 8 MiB.".into());
     }
@@ -270,12 +370,17 @@ pub fn scan(root: &Path) -> DocumentList {
 fn scan_bounded(root: &Path, max_entries: usize, budget: Duration) -> DocumentList {
     let started = Instant::now();
     let mut list = DocumentList {
-        entries: Vec::with_capacity(51),
+        entries: Vec::new(),
         truncated: false,
         scanned_at_ms: crate::workspace::now(),
     };
     for (count, entry) in ignore::WalkBuilder::new(root)
-        .hidden(true)
+        .hidden(false)
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !entry.file_type().is_some_and(|kind| kind.is_dir())
+                || !entry.file_name().to_string_lossy().starts_with('.')
+        })
         .require_git(false)
         .follow_links(false)
         .build()
@@ -307,13 +412,13 @@ fn scan_bounded(root: &Path, max_entries: usize, budget: Duration) -> DocumentLi
             size_bytes: meta.len(),
             open_item_id: None,
         });
-        list.entries.sort_by(|a, b| {
-            b.modified_ms
-                .cmp(&a.modified_ms)
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        list.entries.truncate(50);
     }
+    list.entries.sort_by(|a, b| {
+        b.modified_ms
+            .cmp(&a.modified_ms)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    list.entries.truncate(50);
     list
 }
 
@@ -321,16 +426,28 @@ type ProjectCache = HashMap<PathBuf, (u64, DocumentList)>;
 static PROJECTS: LazyLock<Mutex<ProjectCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Reuse repeated queries within one presentation; opening the palette advances its epoch.
 pub fn project_documents(root: &Path, epoch: u64) -> DocumentList {
-    let mut projects = PROJECTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((cached_epoch, list)) = projects.get(root) {
-        if *cached_epoch == epoch {
-            return list.clone();
+    project_documents_with(root, epoch, scan)
+}
+fn project_documents_with(
+    root: &Path,
+    epoch: u64,
+    scan: impl FnOnce(&Path) -> DocumentList,
+) -> DocumentList {
+    {
+        let projects = PROJECTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cached_epoch, list)) = projects.get(root) {
+            if *cached_epoch == epoch {
+                return list.clone();
+            }
         }
     }
     let list = scan(root);
-    projects.insert(root.to_owned(), (epoch, list.clone()));
+    PROJECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(root.to_owned(), (epoch, list.clone()));
     list
 }
 
@@ -342,8 +459,7 @@ pub fn external_link(url: &str) -> Result<tauri::Url, String> {
     Ok(url)
 }
 pub fn preview(path: &Path) -> Result<DocumentPreview, String> {
-    let (meta, mut bytes) = bounded(path, 64 * 1024).map_err(|error| error.to_string())?;
-    bytes.truncate(64 * 1024);
+    let (meta, bytes) = bounded(path, 64 * 1024, true).map_err(|error| error.to_string())?;
     let text = String::from_utf8_lossy(&bytes);
     let mut preview = DocumentPreview {
         h1: None,
@@ -352,9 +468,15 @@ pub fn preview(path: &Path) -> Result<DocumentPreview, String> {
         size_bytes: meta.len(),
         modified_ms: modified(&meta),
     };
-    let mut fence = false;
+    let mut fence: Option<&str> = None;
     let mut frontmatter = text.starts_with("---\n") || text.starts_with("---\r\n");
-    let mut paragraph = Vec::new();
+    let mut paragraph: Vec<&str> = Vec::new();
+    let flush_paragraph = |paragraph: &mut Vec<&str>, preview: &mut DocumentPreview| {
+        if !paragraph.is_empty() && preview.first_paragraph.is_none() {
+            preview.first_paragraph = Some(paragraph.join(" "));
+        }
+        paragraph.clear();
+    };
     for (index, line) in text.lines().enumerate() {
         let line = line.trim();
         if frontmatter {
@@ -363,37 +485,55 @@ pub fn preview(path: &Path) -> Result<DocumentPreview, String> {
             }
             continue;
         }
+        if let Some(marker) = fence {
+            if line.starts_with(marker) {
+                fence = None;
+            }
+            continue;
+        }
         if line.starts_with("```") || line.starts_with("~~~") {
-            fence = !fence;
+            flush_paragraph(&mut paragraph, &mut preview);
+            fence = Some(&line[..3]);
             continue;
         }
-        if fence {
+        let setext = !paragraph.is_empty()
+            && !line.is_empty()
+            && (line.bytes().all(|byte| byte == b'=') || line.bytes().all(|byte| byte == b'-'));
+        if setext {
+            preview.heading_count += 1;
+            if line.starts_with('=') && preview.h1.is_none() {
+                preview.h1 = Some(paragraph.join(" "));
+            }
+            paragraph.clear();
             continue;
         }
-        let level = line.bytes().take_while(|b| *b == b'#').count();
+        let level = line.bytes().take_while(|byte| *byte == b'#').count();
         if (1..=6).contains(&level)
-            && line
-                .as_bytes()
-                .get(level)
-                .is_some_and(u8::is_ascii_whitespace)
+            && (level == line.len()
+                || line
+                    .as_bytes()
+                    .get(level)
+                    .is_some_and(u8::is_ascii_whitespace))
         {
+            flush_paragraph(&mut paragraph, &mut preview);
             preview.heading_count += 1;
             if level == 1 && preview.h1.is_none() {
-                preview.h1 = Some(line[level..].trim().trim_end_matches('#').trim().into());
+                let heading = line[level..].trim();
+                let closing = heading.trim_end_matches('#');
+                let heading = if closing.ends_with(char::is_whitespace) {
+                    closing.trim_end()
+                } else {
+                    heading
+                };
+                preview.h1 = Some(heading.into());
             }
-        } else if line.is_empty() {
-            if !paragraph.is_empty() && preview.first_paragraph.is_none() {
-                preview.first_paragraph = Some(paragraph.join(" "));
-                paragraph.clear();
-            }
-        } else if preview.first_paragraph.is_none() && !line.starts_with(['>', '-', '*', '|', '<'])
-        {
-            paragraph.push(line.to_owned());
+        } else if line.is_empty() || line.starts_with(['>', '-', '*', '|', '<']) {
+            flush_paragraph(&mut paragraph, &mut preview);
+        } else {
+            paragraph.push(line);
         }
     }
-    if preview.first_paragraph.is_none() && !paragraph.is_empty() {
-        preview.first_paragraph = Some(paragraph.join(" "));
-    }
+    flush_paragraph(&mut paragraph, &mut preview);
     Ok(preview)
 }
 
@@ -401,10 +541,10 @@ struct Watched {
     loaded: Loaded,
     due: Option<Instant>,
     missing_since: Option<Instant>,
-    initial: bool,
+    first_event: Option<Instant>,
 }
 pub struct Manager {
-    watcher: RecommendedWatcher,
+    watcher: Option<RecommendedWatcher>,
     unwatched: std::collections::HashSet<PathBuf>,
     directories: HashMap<PathBuf, usize>,
     files: HashMap<String, Watched>,
@@ -413,22 +553,36 @@ impl Manager {
     pub fn new(
         callback: impl FnMut(Result<Event, notify::Error>) + Send + 'static,
     ) -> Result<Self, String> {
-        Ok(Self {
-            watcher: notify::recommended_watcher(callback).map_err(|e| e.to_string())?,
+        Ok(Self::from_watcher(Some(
+            notify::recommended_watcher(callback).map_err(|error| error.to_string())?,
+        )))
+    }
+    fn from_watcher(watcher: Option<RecommendedWatcher>) -> Self {
+        Self {
+            watcher,
             unwatched: std::collections::HashSet::new(),
             directories: HashMap::new(),
             files: HashMap::new(),
-        })
+        }
     }
     pub fn watch(&mut self, id: String, loaded: Loaded) -> Result<(), String> {
         let dir = Path::new(&loaded.state.path)
             .parent()
             .ok_or("Document has no directory.")?
             .to_owned();
-        if !self.directories.contains_key(&dir) {
-            self.watcher
-                .watch(&dir, RecursiveMode::NonRecursive)
-                .map_err(|e| e.to_string())?;
+        let watch_error = if !self.directories.contains_key(&dir) {
+            match &mut self.watcher {
+                Some(watcher) => watcher
+                    .watch(&dir, RecursiveMode::NonRecursive)
+                    .err()
+                    .map(|error| error.to_string()),
+                None => None,
+            }
+        } else {
+            None
+        };
+        if self.watcher.is_none() || watch_error.is_some() {
+            self.unwatched.insert(dir.clone());
         }
         *self.directories.entry(dir).or_default() += 1;
         self.files.insert(
@@ -437,10 +591,10 @@ impl Manager {
                 loaded,
                 due: Some(Instant::now() + COALESCE),
                 missing_since: None,
-                initial: true,
+                first_event: None,
             },
         );
-        Ok(())
+        watch_error.map_or(Ok(()), Err)
     }
     pub fn forget(&mut self, id: &str) {
         if let Some(file) = self.files.remove(id) {
@@ -448,7 +602,9 @@ impl Manager {
             if let Some(count) = self.directories.get_mut(dir) {
                 *count -= 1;
                 if *count == 0 {
-                    let _ = self.watcher.unwatch(dir);
+                    if let Some(watcher) = &mut self.watcher {
+                        let _ = watcher.unwatch(dir);
+                    }
                     self.unwatched.remove(dir);
                     self.directories.remove(dir);
                 }
@@ -476,12 +632,8 @@ impl Manager {
                         || p == Path::new(&file.loaded.state.path).parent().unwrap()
                 })
             {
-                let due = at + COALESCE;
-                if file.missing_since.is_some() {
-                    file.due = Some(file.due.map_or(due, |existing| existing.min(due)));
-                } else {
-                    file.due.get_or_insert(due);
-                }
+                let first = *file.first_event.get_or_insert(at);
+                file.due = Some((at + COALESCE).min(first + MAX_COALESCE));
             }
         }
     }
@@ -503,27 +655,18 @@ impl Manager {
         let watcher = &mut self.watcher;
         self.unwatched.retain(|directory| {
             !directory.is_dir()
-                || watcher
-                    .watch(directory, RecursiveMode::NonRecursive)
-                    .is_err()
+                || watcher.as_mut().is_none_or(|watcher| {
+                    watcher
+                        .watch(directory, RecursiveMode::NonRecursive)
+                        .is_err()
+                })
         });
         for (id, file) in &mut self.files {
             if !file.due.is_some_and(|due| due <= instant) {
                 continue;
             }
-            if Path::new(&file.loaded.state.path)
-                .try_exists()
-                .is_ok_and(|exists| !exists)
-            {
-                let since = *file.missing_since.get_or_insert(instant);
-                if instant.duration_since(since) < MISSING_GRACE {
-                    file.due = Some(since + MISSING_GRACE);
-                    continue;
-                }
-            } else {
-                file.missing_since = None;
-            }
             file.due = None;
+            file.first_event = None;
             let directory = Path::new(&file.loaded.state.path).parent().unwrap();
             if !directory.is_dir() {
                 self.unwatched.insert(directory.to_owned());
@@ -531,16 +674,7 @@ impl Manager {
             if self.unwatched.contains(directory) {
                 file.due = Some(instant + MISSING_GRACE);
             }
-            if file.loaded.state.status == DocumentStatus::Missing
-                && Path::new(&file.loaded.state.path)
-                    .try_exists()
-                    .is_ok_and(|exists| !exists)
-            {
-                continue;
-            }
-            let result = bounded(Path::new(&file.loaded.state.path), MAX_BYTES);
-            // The path can disappear between the existence probe and open. Preserve the
-            // last read here as well: every disappearance gets the full missing grace.
+            let result = bounded(Path::new(&file.loaded.state.path), MAX_BYTES, false);
             if result
                 .as_ref()
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
@@ -550,15 +684,22 @@ impl Manager {
                     file.due = Some(since + MISSING_GRACE);
                     continue;
                 }
+                if file.loaded.state.status == DocumentStatus::Missing {
+                    continue;
+                }
+            } else {
+                file.missing_since = None;
             }
-            file.loaded.apply_read(now, file.initial, result);
-            file.initial = false;
-            publish(id.clone(), file.loaded.state.clone());
+            match file.loaded.apply_read(now, false, result) {
+                ReadOutcome::Incomplete => file.due = Some(instant + COALESCE),
+                ReadOutcome::Changed => publish(id.clone(), file.loaded.state.clone()),
+                ReadOutcome::Unchanged => {}
+            }
         }
     }
     pub fn text(&self, id: &str) -> Result<DocumentText, String> {
         let file = self.files.get(id).ok_or("Document is closed.")?;
-        if file.loaded.state.status != DocumentStatus::Ok {
+        if file.loaded.state.revision == 0 {
             return Err("Document text is unavailable.".into());
         }
         Ok(DocumentText {
@@ -568,7 +709,14 @@ impl Manager {
     }
     fn reload(&mut self, id: &str) -> Result<DocumentState, String> {
         let file = self.files.get_mut(id).ok_or("Document is closed.")?;
-        file.loaded.reload(crate::workspace::now(), false);
+        let result = bounded(Path::new(&file.loaded.state.path), MAX_BYTES, false);
+        if file
+            .loaded
+            .apply_read(crate::workspace::now(), false, result)
+            == ReadOutcome::Incomplete
+        {
+            file.due = Some(Instant::now() + COALESCE);
+        }
         Ok(file.loaded.state.clone())
     }
 }
@@ -579,7 +727,7 @@ enum Request {
     Text(String, mpsc::Sender<Result<DocumentText, String>>),
     Reload(String, mpsc::Sender<Result<(), String>>),
 }
-static SERVICE: LazyLock<mpsc::Sender<Request>> = LazyLock::new(|| {
+static SERVICE: LazyLock<Result<mpsc::Sender<Request>, String>> = LazyLock::new(|| {
     let (tx, rx) = mpsc::channel();
     let events = tx.clone();
     std::thread::Builder::new()
@@ -592,19 +740,15 @@ static SERVICE: LazyLock<mpsc::Sender<Request>> = LazyLock::new(|| {
             }) {
                 Ok(manager) => manager,
                 Err(error) => {
-                    crate::platform::defer_on_main(Box::new(move || {
-                        crate::workspace::action_error(error)
-                    }));
-                    return;
+                    report_error(error);
+                    Manager::from_watcher(None)
                 }
             };
             loop {
                 match rx.recv_timeout(manager.timeout(Instant::now())) {
                     Ok(Request::Watch(id, loaded)) => {
                         if let Err(error) = manager.watch(id, *loaded) {
-                            crate::platform::defer_on_main(Box::new(move || {
-                                crate::workspace::action_error(error)
-                            }));
+                            report_error(error);
                         }
                     }
                     Ok(Request::Forget(id)) => manager.forget(&id),
@@ -622,33 +766,55 @@ static SERVICE: LazyLock<mpsc::Sender<Request>> = LazyLock::new(|| {
                 manager.due(Instant::now(), crate::workspace::now(), publish);
             }
         })
-        .expect("start document worker");
-    tx
+        .map_err(|error| format!("Could not start document worker: {error}"))?;
+    Ok(tx)
 });
+fn report_error(error: String) {
+    crate::platform::defer_on_main(Box::new(move || crate::workspace::action_error(error)));
+}
 fn publish(id: String, state: DocumentState) {
     crate::platform::defer_on_main(Box::new(move || {
         crate::workspace::apply_document(&id, state)
     }));
 }
 pub fn watch(id: String, loaded: Loaded) {
-    let _ = SERVICE.send(Request::Watch(id, Box::new(loaded)));
+    let result = SERVICE.as_ref().map_err(Clone::clone).and_then(|service| {
+        service
+            .send(Request::Watch(id, Box::new(loaded)))
+            .map_err(|_| "Document worker stopped.".to_owned())
+    });
+    if let Err(error) = result {
+        report_error(error);
+    }
 }
 pub fn forget(id: String) {
-    let _ = SERVICE.send(Request::Forget(id));
+    if let Ok(service) = SERVICE.as_ref() {
+        let _ = service.send(Request::Forget(id));
+    }
 }
 pub fn text(id: String) -> Result<DocumentText, String> {
     let (tx, rx) = mpsc::channel();
     SERVICE
+        .as_ref()
+        .map_err(Clone::clone)?
         .send(Request::Text(id, tx))
         .map_err(|_| "Document worker stopped.")?;
-    rx.recv().map_err(|_| "Document worker stopped.")?
+    wait_reply(rx, REPLY_TIMEOUT)
 }
 pub fn reload(id: String) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     SERVICE
+        .as_ref()
+        .map_err(Clone::clone)?
         .send(Request::Reload(id, tx))
         .map_err(|_| "Document worker stopped.")?;
-    rx.recv().map_err(|_| "Document worker stopped.")?
+    wait_reply(rx, REPLY_TIMEOUT)
+}
+fn wait_reply<T>(reply: mpsc::Receiver<Result<T, String>>, timeout: Duration) -> Result<T, String> {
+    reply.recv_timeout(timeout).map_err(|error| match error {
+        mpsc::RecvTimeoutError::Timeout => "Document worker is busy.",
+        mpsc::RecvTimeoutError::Disconnected => "Document worker stopped.",
+    })?
 }
 #[cfg(test)]
 mod tests;

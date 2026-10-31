@@ -69,7 +69,11 @@ export function documentKey(input: KeyInput, context: KeyContext): KeyResult {
   if (command && !input.altKey && !input.shiftKey && input.key.toLowerCase() === "f") {
     return { action: { kind: "find" }, pendingG: false };
   }
-  if (input.ctrlKey || input.metaKey || input.altKey || context.overlay) return none;
+  if (input.ctrlKey || input.metaKey || input.altKey) return none;
+  // Esc is not a reading key: it reaches the surface from any control that did not handle it, so
+  // the surface closes find, the menu or a popover in order (focused overlays handle their own).
+  if (input.key === "Escape") return { action: { kind: "escape" }, pendingG: false };
+  if (context.overlay) return none;
   if (input.key === "g") {
     return context.pendingG ? { action: { kind: "top" }, pendingG: false } : { action: null, pendingG: true };
   }

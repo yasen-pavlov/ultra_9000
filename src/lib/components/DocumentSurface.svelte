@@ -1,8 +1,3 @@
-<script lang="ts" module>
-  // Diagrams by source, so a re-render after a write does not redraw unchanged ones.
-  const diagrams = new Map<string, Promise<{ svg: string } | { error: string }>>();
-</script>
-
 <script lang="ts">
   // The document surface (boards 31–34): a Markdown file rendered in the panel the terminal uses,
   // same background and corners, no toolbar. Native sends text when `document.revision` bumps; this
@@ -10,11 +5,15 @@
   // across re-renders (nearest heading + offset), can follow the tail, and says what happened in
   // one line at the bottom right. Reading keys are plain DOM keys: the web view owns the keyboard
   // here, and app chords still reach native first.
+  //
+  // Trust boundary: the prose is sanitised HTML from render.ts, written into the article once per
+  // applied render; the reader's own controls are created here and recognised by node identity
+  // (`controls`), never by classes or attributes the document could also produce.
   import { tick } from "svelte";
   import { run } from "../errors.svelte";
   import { formatBytes } from "../format";
   import { clearMatches, firstMatchFrom, markMatches } from "../document/find";
-  import { followAfterAction, followAfterScroll } from "../document/follow";
+  import { followAfterAction, followAfterKeyScroll, followAfterScroll } from "../document/follow";
   import { frontmatterSummary } from "../document/frontmatter";
   import { loadedHighlighter, loadHighlighter } from "../document/highlight";
   import { documentKey, outlineMode, type DocumentAction } from "../document/keys";
@@ -24,6 +23,7 @@
   import type { DocumentHeading, RenderedDocument } from "../document/render";
   import { documentSessions } from "../document/session.svelte";
   import { statusLine } from "../document/status";
+  import { acceptsText, wantsText } from "../document/surface-state";
   import {
     documentAsset,
     documentOpenLink,
@@ -40,13 +40,30 @@
   import DocumentMenu, { type DocumentMenuAction } from "./DocumentMenu.svelte";
   import DocumentOutline from "./DocumentOutline.svelte";
 
-  let { itemId, title, doc }: { itemId: string; title: string; doc: DocumentState } = $props();
+  let {
+    itemId,
+    title,
+    doc,
+    presentationEpoch,
+  }: {
+    itemId: string;
+    title: string;
+    doc: DocumentState;
+    /** Native bumps it on every intentional presentation (selection, sheet closed); focus follows it. */
+    presentationEpoch: number;
+  } = $props();
+
+  type DiagramResult = { svg: string } | { error: string };
 
   // Per item: the parent keys this component by item id, so these are fixed for its lifetime.
   // svelte-ignore state_referenced_locally
   const memory = documentSessions.memory(itemId);
   const mac = /Mac/.test(navigator.userAgent);
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  /** The reader's own controls in the prose, by identity, with what activating each does. */
+  const controls = new WeakMap<Element, (() => void) | null>();
+  /** Mermaid results for the diagrams of the current render only, by source. */
+  const diagrams = new Map<string, Promise<DiagramResult>>();
 
   let rendered = $state.raw<RenderedDocument | null>(null);
   let loadError = $state<string | null>(null);
@@ -73,9 +90,11 @@
   let rail = $state<ReturnType<typeof DocumentOutline> | null>(null);
   let finder = $state<ReturnType<typeof DocumentFind> | null>(null);
 
-  let generation = 0;
-  let fetchedRevision = -1;
-  let lastText: string | null = null;
+  /** Highest revision asked for or received; the snapshot may lag behind a reply. */
+  let fetchedRevision = memory.revision;
+  /** Revision of the newest text accepted for rendering. */
+  let latestRevision = -1;
+  let destroyed = false;
   let pendingG = false;
   let programmatic = false;
   let lastTop = 0;
@@ -116,21 +135,29 @@
     memory.findText = findText;
   });
 
-  // Fetch and render whenever native read a new revision. Missing, unreadable and too-large files
-  // keep the last rendered version (if any) under their notice.
+  // The last text read shows at once on return (also under a missing/unreadable notice); then
+  // native is asked whenever it read something newer (surface-state.ts).
   $effect(() => {
-    // document_text may answer with a revision newer than this snapshot (a reload just finished);
-    // that text is kept, and the snapshot that catches up to it does not fetch again.
-    if (doc.status !== "ok" || doc.revision <= fetchedRevision) return;
-    void refresh(doc.revision);
+    const text = memory.text;
+    if (text !== null) void accept(memory.revision, text);
+    return () => {
+      destroyed = true;
+      observer?.disconnect();
+      diagrams.clear();
+      if (scroller !== null && rendered !== null) memory.place = capturePlace(headingTops(), scroller.scrollTop);
+    };
   });
 
   $effect(() => {
+    if (!wantsText(doc, fetchedRevision, true)) return;
+    void refresh(doc.revision);
+  });
+
+  // Selecting the document (also the one already selected) or closing a sheet over it gives it the
+  // keyboard; content revisions never move focus.
+  $effect(() => {
+    void presentationEpoch;
     scroller?.focus({ preventScroll: true });
-    return () => {
-      observer?.disconnect();
-      if (scroller !== null && rendered !== null) memory.place = capturePlace(headingTops(), scroller.scrollTop);
-    };
   });
 
   // Matches follow the query (and every re-render, which replaces the marked DOM). A changed query
@@ -158,29 +185,37 @@
   }
 
   async function refresh(revision: number): Promise<void> {
-    const mine = ++generation;
-    fetchedRevision = revision;
+    fetchedRevision = Math.max(fetchedRevision, revision);
     try {
       const text = await documentText(itemId);
-      if (mine !== generation) return;
-      fetchedRevision = text.revision;
-      lastText = text.text;
+      if (destroyed) return;
+      // A reply may be newer than the snapshot that asked (a reload just finished): keep it.
+      fetchedRevision = Math.max(fetchedRevision, text.revision);
       loadError = null;
-      await draw(mine, text.text, "revision");
+      await accept(text.revision, text.text);
     } catch (error) {
-      if (mine === generation) loadError = errorMessage(error);
+      if (!destroyed) loadError = errorMessage(error);
     }
   }
 
-  async function draw(mine: number, text: string, reason: "revision" | "restyle"): Promise<void> {
+  /** Renders a reply unless a newer one was already accepted. */
+  async function accept(revision: number, text: string): Promise<void> {
+    if (!acceptsText(revision, latestRevision)) return;
+    latestRevision = revision;
+    memory.text = text;
+    memory.revision = revision;
+    await draw(revision, text, "revision");
+  }
+
+  async function draw(revision: number, text: string, reason: "revision" | "restyle"): Promise<void> {
     const { renderMarkdown } = await import("../document/render");
     const result = await renderMarkdown(text, { loadAsset, highlighter: loadedHighlighter() });
-    if (mine !== generation) return;
+    if (destroyed || revision !== latestRevision) return;
     await apply(result, reason);
     if (result.needsHighlighter) {
       loadHighlighter().then(
         () => {
-          if (mine === generation && lastText !== null) void draw(mine, lastText, "restyle");
+          if (!destroyed && revision === latestRevision) void draw(revision, text, "restyle");
         },
         () => {
           // Code stays plain mono text; nothing else depends on highlighting.
@@ -215,14 +250,20 @@
   }
 
   async function apply(result: RenderedDocument, reason: "revision" | "restyle"): Promise<void> {
+    if (content === null) return;
     const before =
       rendered === null || scroller === null
         ? null
-        : { place: capturePlace(headingTops(), scroller.scrollTop), lineCount: rendered.lineCount, atEnd: atEnd() };
+        : { place: capturePlace(headingTops(), scroller.scrollTop), lineCount: rendered.lineCount };
+    // Fresh prose DOM for every applied render, so controls and diagrams are set up exactly once
+    // per node even when the HTML did not change (an edit to frontmatter only, a reload). The
+    // article has no template children, so Svelte never reconciles inside it.
+    // eslint-disable-next-line svelte/no-dom-manipulating -- sanitised HTML from render.ts into an otherwise empty element
+    content.innerHTML = result.html;
+    decorate(content);
     rendered = result;
     documentSessions.setH1(itemId, result.h1);
     await tick();
-    decorate();
     if (follow) {
       toEnd();
       return;
@@ -242,37 +283,40 @@
     if (added > 0 && !atEnd()) linesBelow += added;
   }
 
+  function control(tag: "button" | "p" | "div", className: string, action: (() => void) | null): HTMLElement {
+    const element = document.createElement(tag);
+    element.className = className;
+    if (element instanceof HTMLButtonElement) element.type = "button";
+    controls.set(element, action);
+    return element;
+  }
+
   /** The reader's own controls on rendered blocks: heading anchors, Copy, lazy Mermaid. */
-  function decorate(): void {
-    if (content === null) return;
-    for (const heading of content.querySelectorAll<HTMLElement>("h1[id], h2[id], h3[id], h4[id]")) {
-      const anchor = document.createElement("button");
-      anchor.type = "button";
-      anchor.className = "h-anchor";
-      anchor.tabIndex = -1;
-      anchor.dataset.readerChrome = "";
+  function decorate(prose: HTMLElement): void {
+    for (const heading of prose.querySelectorAll<HTMLElement>("h1[id], h2[id], h3[id], h4[id]")) {
+      const slug = heading.id.replace(/^user-content-/, "");
+      const anchor = control("button", "h-anchor", () => void copy(`${doc.path}#${slug}`));
       anchor.setAttribute("aria-label", "Copy link to this heading");
       anchor.textContent = "#";
       heading.prepend(anchor);
     }
-    for (const block of content.querySelectorAll<HTMLElement>(".code-block")) {
-      const copy = document.createElement("button");
-      copy.type = "button";
-      copy.className = "code-copy";
-      copy.tabIndex = -1;
-      copy.dataset.readerChrome = "";
-      copy.setAttribute("aria-label", "Copy code");
+    for (const block of prose.querySelectorAll<HTMLElement>(".code-block")) {
+      const source = block.querySelector("pre")?.textContent ?? "";
+      const copyButton = control("button", "code-copy", () => void copy(source));
+      copyButton.setAttribute("aria-label", "Copy code");
       const lang = document.createElement("span");
       lang.className = "lang";
       lang.textContent = block.dataset.lang ?? "";
       const action = document.createElement("span");
       action.className = "act";
       action.textContent = "Copy";
-      copy.append(lang, action);
-      block.append(copy);
+      copyButton.append(lang, action);
+      block.append(copyButton);
     }
     observer?.disconnect();
-    const boxes = content.querySelectorAll<HTMLElement>(".mermaid");
+    const boxes = [...prose.querySelectorAll<HTMLElement>(".mermaid")];
+    const sources = new Set(boxes.map((box) => box.querySelector("code")?.textContent ?? ""));
+    for (const source of diagrams.keys()) if (!sources.has(source)) diagrams.delete(source);
     if (boxes.length === 0 || typeof IntersectionObserver === "undefined") return;
     observer = new IntersectionObserver(
       (entries) => {
@@ -302,9 +346,9 @@
     const result = await pending;
     if (!box.isConnected) return;
     if ("svg" in result) {
-      // Mermaid's own strict-mode output (DOMPurify-sanitised); the source stays for find and copy.
-      const figure = document.createElement("div");
-      figure.className = "diagram";
+      // Cleaned SVG only (mermaid.ts): no HTML, images, links, scripts or handlers. The source
+      // stays in the page, hidden, for find and copy.
+      const figure = control("div", "diagram", null);
       figure.setAttribute("role", "img");
       figure.setAttribute("aria-label", "Diagram");
       figure.innerHTML = result.svg;
@@ -313,12 +357,18 @@
     } else {
       box.style.height = "";
       box.classList.add("failed");
-      const reason = document.createElement("p");
-      reason.className = "block-error";
-      reason.dataset.readerChrome = "";
+      const reason = control("p", "block-error", null);
       reason.textContent = `Mermaid · ${result.error}`;
       box.prepend(reason);
     }
+  }
+
+  /** The reader-owned control `target` is in, if any (identity, not markup). */
+  function controlOf(target: Element): Element | null {
+    for (let element: Element | null = target; element !== null && element !== root; element = element.parentElement) {
+      if (controls.has(element)) return element;
+    }
+    return null;
   }
 
   function mark(query: string, reveal: boolean): void {
@@ -328,7 +378,7 @@
       matches = [];
       return;
     }
-    matches = markMatches(content, query);
+    matches = markMatches(content, query, (element) => controls.has(element));
     if (matches.length === 0 || scroller === null) return;
     const base = scroller.getBoundingClientRect().top - scroller.scrollTop;
     matchIndex = firstMatchFrom(
@@ -364,11 +414,6 @@
     return content === null ? 28 : Number.parseFloat(getComputedStyle(content).lineHeight) || 28;
   }
 
-  function scrollBy(distance: number): void {
-    if (scroller === null) return;
-    setScroll(scroller.scrollTop + distance);
-  }
-
   function goHeading(heading: { id: string }, smooth = true): void {
     const top = headingTops().find((candidate) => candidate.id === heading.id)?.top;
     if (top === undefined || scroller === null) return;
@@ -392,10 +437,13 @@
     if (follow) toEnd();
   }
 
+  /** “copied” shows only once the clipboard actually took the text. */
   async function copy(text: string): Promise<void> {
-    await run("Copy", () => navigator.clipboard.writeText(text));
-    copiedAt = Date.now();
-    now = copiedAt;
+    await run("Copy", async () => {
+      await navigator.clipboard.writeText(text);
+      copiedAt = Date.now();
+      now = copiedAt;
+    });
   }
 
   function outline(): void {
@@ -421,13 +469,31 @@
     scroller?.focus({ preventScroll: true });
   }
 
+  /** Esc closes the topmost open thing: find, then the menu, then a footnote, then the outline popover. */
+  function escape(): void {
+    if (findOpen) closeFind();
+    else if (menuOpen) menuOpen = false;
+    else if (footnote !== null) footnote = null;
+    else if (outlineOpen) outlineOpen = false;
+    else return;
+    scroller?.focus({ preventScroll: true });
+  }
+
+  /** A reading key that moved the view; reaching the end of a live file that way follows it. */
+  function keyScroll(distance: number, direction: 1 | -1): void {
+    if (scroller === null) return;
+    setScroll(scroller.scrollTop + distance);
+    follow = followAfterKeyScroll(follow, direction, atEnd(), doc.liveUntilMs > Date.now());
+    if (follow) linesBelow = 0;
+  }
+
   function perform(action: DocumentAction | { kind: DocumentMenuAction }): void {
     if (action.kind !== "follow") follow = followAfterAction(follow, action, doc.liveUntilMs > Date.now());
     switch (action.kind) {
       case "scroll": {
         const height = scroller?.clientHeight ?? 0;
         const step = action.unit === "lines" ? 3 * lead() : action.unit === "half" ? height / 2 : height - lead();
-        scrollBy(step * action.direction);
+        keyScroll(step * action.direction, action.direction);
         break;
       }
       case "top":
@@ -469,21 +535,25 @@
         menuOpen = true;
         break;
       case "escape":
-        if (outlineOpen || footnote !== null) closeOverlays();
+        escape();
         break;
     }
   }
 
   function onkeydown(event: KeyboardEvent): void {
     const target = event.target instanceof Element ? event.target : null;
+    // Enter and Space activate the focused button (a reader control, the frontmatter line).
+    if ((event.key === "Enter" || event.key === " ") && target instanceof HTMLButtonElement) return;
     const inRail = rail?.contains(target) === true;
-    const overlay = inRail || target?.closest("[data-doc-overlay], input, textarea, select") != null;
+    // Reading keys work from the page itself; any other control (find, the menu, the outline,
+    // buttons outside the page) owns its keys. Decided by element identity, never markup.
+    const reading = target === root || (scroller?.contains(target) === true && !inRail);
     // `o` pressed again from inside the rail hides it (board 34); the rail's other keys are its own.
     const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
     const result =
       inRail && plain && event.key === "o"
         ? { action: { kind: "outline" } as const, pendingG: false }
-        : documentKey(event, { overlay, pendingG, hasFind: findText !== "", mac });
+        : documentKey(event, { overlay: !reading, pendingG, hasFind: findText !== "", mac });
     pendingG = result.pendingG;
     if (result.action === null) {
       if (result.pendingG) event.preventDefault();
@@ -531,29 +601,26 @@
     setScroll(top - 8, true);
   }
 
+  /**
+   * One dispatcher for every rendered subtree (the prose and the footnote preview): links never
+   * navigate the privileged web view, and reader controls act by identity.
+   */
   function onclick(event: MouseEvent): void {
     const target = event.target instanceof Element ? event.target : null;
     if (target === null) return;
-    const codeCopy = target.closest(".code-copy");
-    if (codeCopy !== null) {
-      void copy(codeCopy.parentElement?.querySelector("pre")?.textContent ?? "");
-      return;
-    }
-    const anchor = target.closest(".h-anchor");
-    if (anchor !== null) {
-      const id = anchor.parentElement?.id ?? "";
-      void copy(`${doc.path}#${id.replace(/^user-content-/, "")}`);
-      return;
-    }
     const link = target.closest("a");
-    if (link === null) return;
-    // The privileged web view never navigates away from the app.
-    event.preventDefault();
-    const href = link.getAttribute("href");
+    if (link !== null) event.preventDefault();
+    const owned = controlOf(target);
+    if (owned !== null) {
+      controls.get(owned)?.();
+      return;
+    }
+    const href = link?.getAttribute("href") ?? null;
     if (href === null) return;
     const destination = linkTarget(doc.path, href);
     switch (destination.kind) {
       case "fragment":
+        footnote = null;
         scrollToFragment(destination.id);
         break;
       case "external":
@@ -592,7 +659,7 @@
     if (ref === null || root === null) return;
     const id = (ref.getAttribute("href") ?? "").slice(1);
     const note = document.getElementById(`user-content-${id}`) ?? document.getElementById(id);
-    if (note === null) return;
+    if (note === null || content?.contains(note) !== true) return;
     const clone = note.cloneNode(true) as HTMLElement;
     for (const back of clone.querySelectorAll("[data-footnote-backref]")) back.remove();
     const box = root.getBoundingClientRect();
@@ -609,9 +676,10 @@
   }
 </script>
 
-<!-- keydown is the reading-key router for the whole surface -->
+<!-- keydown is the reading-key router; click/auxclick route links and reader controls for every
+     rendered subtree (prose and footnote preview) -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="docsurf" bind:this={root} bind:clientWidth={panelWidth} {onkeydown}>
+<div class="docsurf" bind:this={root} bind:clientWidth={panelWidth} {onkeydown} {onclick} {onauxclick}>
   {#if doc.status === "missing"}
     <div class="notice" role="status">
       <span class="grow"
@@ -672,24 +740,16 @@
             {/if}
           </div>
         {/if}
-        <!-- Delegated handlers for the rendered prose's own links, buttons and footnotes. -->
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+        <!-- Prose is written by apply() (sanitised HTML); hovering or focusing a footnote reference previews it. -->
         <article
           class="prose selectable"
           bind:this={content}
-          {onclick}
-          {onauxclick}
           onmouseover={showFootnote}
           onmouseout={hideFootnote}
           onfocusin={showFootnote}
           onfocusout={hideFootnote}
           onerrorcapture={onimageerror}
-        >
-          {#if rendered !== null}
-            <!-- eslint-disable-next-line svelte/no-at-html-tags -- sanitised by rehype-sanitize (document/render.ts) -->
-            {@html rendered.html}
-          {/if}
-        </article>
+        ></article>
       </div>
       {#if mode === "rail"}
         <DocumentOutline
@@ -996,10 +1056,12 @@
     font-weight: 400;
     opacity: 0;
   }
+  /* Shown on hover, and while the anchor itself has keyboard focus. */
   .prose :global(h1:hover .h-anchor),
   .prose :global(h2:hover .h-anchor),
   .prose :global(h3:hover .h-anchor),
-  .prose :global(h4:hover .h-anchor) {
+  .prose :global(h4:hover .h-anchor),
+  .prose :global(.h-anchor:focus-visible) {
     opacity: 1;
   }
   .prose :global(a) {
@@ -1115,10 +1177,12 @@
     font-family: var(--ui);
   }
   .prose :global(.code-copy .act),
-  .prose :global(.code-block:hover .code-copy .lang) {
+  .prose :global(.code-block:hover .code-copy .lang),
+  .prose :global(.code-block:focus-within .code-copy .lang) {
     display: none;
   }
-  .prose :global(.code-block:hover .code-copy .act) {
+  .prose :global(.code-block:hover .code-copy .act),
+  .prose :global(.code-block:focus-within .code-copy .act) {
     display: inline;
   }
   .prose :global(.code-copy:hover) {

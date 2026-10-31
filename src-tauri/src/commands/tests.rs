@@ -593,4 +593,56 @@ fn palette_editor_route_does_not_create_a_document_row() {
             path.canonicalize().unwrap().to_string_lossy().into_owned()
         ]
     );
+    let reused = main
+        .run(new_neovim_for_path(path.to_string_lossy().into_owned()))
+        .unwrap();
+    assert_eq!(reused, editor, "a starting editor is reused");
+    host.complete(&editor);
+    let reused = main
+        .run(new_neovim_for_path(path.to_string_lossy().into_owned()))
+        .unwrap();
+    assert_eq!(reused, editor, "a running editor is reused");
+    let document = main
+        .run(open_document(
+            path.to_string_lossy().into_owned(),
+            true,
+            false,
+        ))
+        .unwrap();
+    assert_eq!(main.run(new_neovim_for_file(document)).unwrap(), editor);
+    assert_eq!(host.prepared.borrow().len(), 1);
+}
+
+#[test]
+fn project_documents_accepts_saved_only_projects_and_canonicalizes_roots() {
+    let (main, _host, app) = setup();
+    let dir = Dir::new();
+    let root = dir.sub("saved-project");
+    fs::write(Path::new(&root).join(".notes.md"), "# Notes\n").unwrap();
+    let alias = dir.0.join("alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    apply_settings(Settings {
+        roots: vec![PathBuf::from(&root)],
+        ..Settings::default()
+    });
+    assert!(state(&app).items.is_empty());
+    let list = main
+        .run(project_documents(alias.to_string_lossy().into_owned()))
+        .unwrap();
+    assert_eq!(list.entries.len(), 1);
+    assert_eq!(list.entries[0].name, ".notes.md");
+    assert!(list.entries[0].path.starts_with(&root));
+    let outside = dir.sub("outside");
+    assert!(main
+        .run(project_documents(outside))
+        .unwrap_err()
+        .contains("outside projects.roots"));
+    assert!(main
+        .run(project_documents(
+            Path::new(&root)
+                .join(".notes.md")
+                .to_string_lossy()
+                .into_owned()
+        ))
+        .is_err());
 }

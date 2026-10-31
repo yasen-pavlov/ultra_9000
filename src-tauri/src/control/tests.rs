@@ -1077,4 +1077,19 @@ mod commands {
         assert_eq!(f.state().active_item_id, Some(document));
         assert_eq!(f.state().view, "document");
     }
+
+    #[test]
+    fn open_document_rejects_relative_wire_paths_without_mutation() {
+        let f = setup();
+        let failure = f
+            .run(Command::OpenDocument {
+                path: "report.md".into(),
+                select: true,
+                follow: false,
+            })
+            .unwrap_err();
+        assert_eq!(failure.error, "invalid_args");
+        assert!(failure.message.contains("absolute"));
+        assert!(f.state().items.is_empty());
+    }
 }

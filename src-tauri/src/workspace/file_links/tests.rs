@@ -8,6 +8,7 @@ fn route(path: &Path) -> FileTarget {
         tauri::Url::from_file_path(path).unwrap().as_str(),
         path.parent().unwrap().to_str().unwrap(),
         false,
+        &[],
     )
     .unwrap()
 }
@@ -362,7 +363,7 @@ fn localhost_and_encoded_separators_decode_once_without_losing_reserved_characte
         format!("{uri}#L12;execute-dangerous-command"),
     ] {
         assert_eq!(
-            validate(&uri, dir.path().to_str().unwrap(), false).unwrap(),
+            validate(&uri, dir.path().to_str().unwrap(), false, &[]).unwrap(),
             expected
         );
     }
@@ -384,13 +385,13 @@ fn this_machines_hostname_is_local_but_other_hosts_remain_remote() {
     for host in [host.to_owned(), host.to_ascii_uppercase()] {
         uri.set_host(Some(&host)).unwrap();
         assert_eq!(
-            validate(uri.as_str(), dir.path().to_str().unwrap(), false).unwrap(),
+            validate(uri.as_str(), dir.path().to_str().unwrap(), false, &[]).unwrap(),
             FileTarget::Neovim(path.to_str().unwrap().to_owned())
         );
     }
     uri.set_host(Some(&format!("not-this-machine.{host}")))
         .unwrap();
-    assert!(validate(uri.as_str(), dir.path().to_str().unwrap(), false).is_err());
+    assert!(validate(uri.as_str(), dir.path().to_str().unwrap(), false, &[]).is_err());
 }
 
 #[test]
@@ -416,7 +417,7 @@ fn malformed_remote_and_non_file_uris_are_rejected() {
         "file:///etc\\passwd",
         " file:///etc/passwd",
     ] {
-        assert!(validate(uri, "/", false).is_err(), "{uri:?}");
+        assert!(validate(uri, "/", false, &[]).is_err(), "{uri:?}");
     }
 }
 
@@ -437,7 +438,7 @@ fn missing_directories_special_files_and_invalid_source_cwds_are_rejected() {
         std::path::Path::new("/dev/null"),
     ] {
         let uri = tauri::Url::from_file_path(path).unwrap().to_string();
-        assert!(validate(&uri, "/", false).is_err(), "{uri}");
+        assert!(validate(&uri, "/", false, &[]).is_err(), "{uri}");
     }
     let file = dir.path().join("file");
     fs::write(&file, "file").unwrap();
@@ -447,7 +448,7 @@ fn missing_directories_special_files_and_invalid_source_cwds_are_rejected() {
         file.to_str().unwrap(),
         "relative",
     ] {
-        assert!(validate(&uri, cwd, false).is_err(), "{cwd}");
+        assert!(validate(&uri, cwd, false, &[]).is_err(), "{cwd}");
     }
 }
 
@@ -460,14 +461,16 @@ fn symlinked_files_keep_the_clicked_path_and_non_utf8_never_becomes_lossy_argv()
     std::os::unix::fs::symlink(&file, &link).unwrap();
     let uri = tauri::Url::from_file_path(&link).unwrap().to_string();
     assert_eq!(
-        validate(&uri, "/", false).unwrap(),
+        validate(&uri, "/", false, &[]).unwrap(),
         FileTarget::Neovim(link.to_str().unwrap().to_owned())
     );
 
     let non_utf8 = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
     // Rejection precedes metadata: APFS cannot create this name, and no file is needed.
     let uri = tauri::Url::from_file_path(&non_utf8).unwrap().to_string();
-    assert!(validate(&uri, "/", false).unwrap_err().contains("UTF-8"));
+    assert!(validate(&uri, "/", false, &[])
+        .unwrap_err()
+        .contains("UTF-8"));
 }
 
 #[test]
@@ -828,10 +831,10 @@ fn markdown_links_obey_view_and_neovim_policy_case_insensitively() {
         let uri = tauri::Url::from_file_path(&path).unwrap();
         let cwd = dir.path().to_str().unwrap();
         assert!(
-            matches!(validate(uri.as_str(), cwd, true).unwrap(), FileTarget::Document(loaded, _) if loaded.state.path == path.canonicalize().unwrap().to_string_lossy())
+            matches!(validate(uri.as_str(), cwd, true, &[]).unwrap(), FileTarget::Document(loaded, _) if loaded.state.path == path.canonicalize().unwrap().to_string_lossy())
         );
         assert!(matches!(
-            validate(uri.as_str(), cwd, false).unwrap(),
+            validate(uri.as_str(), cwd, false, &[]).unwrap(),
             FileTarget::Neovim(_)
         ));
     }
@@ -844,6 +847,35 @@ fn invalid_utf8_markdown_opens_the_unreadable_surface_not_an_external_viewer() {
     fs::write(&path, [0xff, 0xfe, 0]).unwrap();
     let uri = tauri::Url::from_file_path(&path).unwrap();
     assert!(
-        matches!(validate(uri.as_str(), dir.path().to_str().unwrap(), true).unwrap(), FileTarget::Document(loaded, _) if loaded.state.status == crate::documents::DocumentStatus::Unreadable)
+        matches!(validate(uri.as_str(), dir.path().to_str().unwrap(), true, &[]).unwrap(), FileTarget::Document(loaded, _) if loaded.state.status == crate::documents::DocumentStatus::Unreadable)
     );
+}
+
+#[test]
+fn markdown_outside_project_roots_retains_the_neovim_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    fs::create_dir(&root).unwrap();
+    let outside = dir.path().join("outside.md");
+    fs::write(&outside, "# Outside\n").unwrap();
+    let uri = tauri::Url::from_file_path(&outside).unwrap();
+    let origin = FileOrigin {
+        key: 1,
+        item: "source".into(),
+        cwd: root.to_string_lossy().into_owned(),
+        project: root.to_string_lossy().into_owned(),
+        markdown_view: true,
+        roots: vec![root.clone()],
+    };
+    assert_eq!(
+        validate_origin(&origin, uri.as_str()).unwrap(),
+        FileTarget::Neovim(outside.to_string_lossy().into_owned())
+    );
+    let inside = root.join("inside.md");
+    fs::write(&inside, "# Inside\n").unwrap();
+    let uri = tauri::Url::from_file_path(&inside).unwrap();
+    assert!(matches!(
+        validate_origin(&origin, uri.as_str()).unwrap(),
+        FileTarget::Document(_, _)
+    ));
 }

@@ -56,13 +56,18 @@ describe("keymap precedence", () => {
   const overlay: KeyContext = { ...reading, overlay: true, hasFind: true };
 
   it("makes plain keys inert while find, a menu or the outline holds focus", () => {
-    for (const text of ["j", "k", "g", "G", "f", "o", "e", "y", "r", ".", "/", "n", " ", "Escape"]) {
+    for (const text of ["j", "k", "g", "G", "f", "o", "e", "y", "r", ".", "/", "n", " "]) {
       expect(documentKey(key(text), overlay)).toEqual({ action: null, pendingG: false });
     }
   });
 
   it("still lets Ctrl+F reach find from inside an overlay", () => {
     expect(documentKey(key("f", { ctrlKey: true }), overlay).action).toEqual({ kind: "find" });
+  });
+
+  it("lets Esc through from any control so the surface can close what is open", () => {
+    expect(documentKey(key("Escape"), overlay).action).toEqual({ kind: "escape" });
+    expect(documentKey(key("Escape", { ctrlKey: true }), overlay).action).toBeNull();
   });
 });
 

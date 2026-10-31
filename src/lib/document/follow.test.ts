@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { followAfterAction, followAfterScroll, type ScrollFacts } from "./follow";
+import { followAfterAction, followAfterKeyScroll, followAfterScroll, type ScrollFacts } from "./follow";
 
 function scroll(overrides: Partial<ScrollFacts>): ScrollFacts {
   return { follow: false, movedUp: false, atEnd: false, live: false, programmatic: false, ...overrides };
@@ -43,5 +43,17 @@ describe("follow on reading keys", () => {
   it("other actions leave it alone", () => {
     expect(followAfterAction(true, { kind: "copy-path" }, false)).toBe(true);
     expect(followAfterAction(false, { kind: "find" }, true)).toBe(false);
+  });
+});
+
+describe("follow after a reading key scrolled down", () => {
+  it("turns on when j, Space or PageDown reach the end of a live file", () => {
+    expect(followAfterKeyScroll(false, 1, true, true)).toBe(true);
+  });
+
+  it("stays off short of the end, on a file at rest, or after moving up", () => {
+    expect(followAfterKeyScroll(false, 1, false, true)).toBe(false);
+    expect(followAfterKeyScroll(false, 1, true, false)).toBe(false);
+    expect(followAfterKeyScroll(false, -1, true, true)).toBe(false);
   });
 });

@@ -659,17 +659,17 @@ fn user_icons_default_to_mono_without_fill() {
 fn markdown_route_defaults_to_view_and_hot_reloads_with_last_good_validation() {
     let f = Fixture::new();
     let mut store = ConfigStore::load(f.0.clone());
-    assert_eq!(store.settings().markdown, "view");
+    assert_eq!(store.settings().markdown, MarkdownRoute::View);
     assert_eq!(
         value(&store, "file_links.markdown").unwrap().value,
         json!("view")
     );
     fs::write(&f.0.ultra, "[file_links]\nmarkdown = 'neovim'\n").unwrap();
     assert!(store.reload().settings);
-    assert_eq!(store.settings().markdown, "neovim");
+    assert_eq!(store.settings().markdown, MarkdownRoute::Neovim);
     fs::write(&f.0.ultra, "[file_links]\nmarkdown = 'system'\n").unwrap();
     store.reload();
-    assert_eq!(store.settings().markdown, "neovim");
+    assert_eq!(store.settings().markdown, MarkdownRoute::Neovim);
     assert_eq!(
         only_error(&store).key.as_deref(),
         Some("file_links.markdown")
@@ -677,6 +677,6 @@ fn markdown_route_defaults_to_view_and_hot_reloads_with_last_good_validation() {
     store
         .set("file_links.markdown", json!("view"), WriteTarget::Auto)
         .unwrap();
-    assert_eq!(store.settings().markdown, "view");
+    assert_eq!(store.settings().markdown, MarkdownRoute::View);
     assert!(errors(&store).is_empty());
 }

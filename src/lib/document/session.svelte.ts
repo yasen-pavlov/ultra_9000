@@ -11,6 +11,9 @@ export interface DocumentMemory {
   linesBelow: number;
   /** `document_asset` replies as data: URLs by relative path; cleared by reload. */
   assets: Map<string, Promise<string | null>>;
+  /** The last text shown and its revision: shown again at once after switching back, also under a missing/unreadable notice. */
+  text: string | null;
+  revision: number;
 }
 
 class DocumentSessions {
@@ -23,7 +26,7 @@ class DocumentSessions {
   memory(itemId: string): DocumentMemory {
     let memory = this.#memory.get(itemId);
     if (memory === undefined) {
-      memory = { place: null, follow: null, findText: "", linesBelow: 0, assets: new Map() };
+      memory = { place: null, follow: null, findText: "", linesBelow: 0, assets: new Map(), text: null, revision: -1 };
       this.#memory.set(itemId, memory);
     }
     return memory;

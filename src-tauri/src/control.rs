@@ -166,7 +166,7 @@ pub fn project<'a>(state: &'a WorkspaceState, context: &Context) -> Snapshot<'a>
     let items: HashMap<&str, &ItemState> = state
         .items
         .iter()
-        .filter(|i| i.document.is_none())
+        .filter(|i| i.kind != workspace::ItemKind::Document)
         .map(|i| (i.id.as_str(), i))
         .collect();
     let active = state.active_item_id.as_deref();
@@ -195,7 +195,7 @@ pub fn project<'a>(state: &'a WorkspaceState, context: &Context) -> Snapshot<'a>
         .iter()
         .flat_map(|p| p.item_ids.iter())
         .filter_map(|id| items.get(id).copied())
-        .map(|item| project_item(state, item, active == Some(item.id.as_str())))
+        .filter_map(|item| project_item(state, item, active == Some(item.id.as_str())))
         .collect();
     Snapshot {
         app: AppInfo {
@@ -212,20 +212,23 @@ pub fn project<'a>(state: &'a WorkspaceState, context: &Context) -> Snapshot<'a>
     }
 }
 
-fn project_item<'a>(state: &'a WorkspaceState, item: &'a ItemState, selected: bool) -> Item<'a> {
+fn project_item<'a>(
+    state: &'a WorkspaceState,
+    item: &'a ItemState,
+    selected: bool,
+) -> Option<Item<'a>> {
+    let kind = match item.kind {
+        workspace::ItemKind::Agent => "agent",
+        workspace::ItemKind::Terminal if item.tool == "neovim" => "neovim",
+        workspace::ItemKind::Terminal => "shell",
+        workspace::ItemKind::Document => return None,
+    };
     let tool = state.tools.iter().find(|t| t.id == item.tool);
     let running = item.process == Some(Process::Running);
-    Item {
+    Some(Item {
         id: &item.id,
         project_id: &item.project_id,
-        kind: match item.kind {
-            workspace::ItemKind::Agent => "agent",
-            workspace::ItemKind::Terminal if item.tool == "neovim" => "neovim",
-            workspace::ItemKind::Terminal => "shell",
-            workspace::ItemKind::Document => {
-                unreachable!("documents are excluded from control snapshots")
-            }
-        },
+        kind,
         tool: &item.tool,
         tool_label: tool.map_or(item.tool.as_str(), |t| t.label.as_str()),
         tool_glyph: tool.map_or("", |t| t.glyph.as_str()),
@@ -259,7 +262,7 @@ fn project_item<'a>(state: &'a WorkspaceState, item: &'a ItemState, selected: bo
             }),
         exit_code: item.exit_code,
         cwd: &item.cwd,
-    }
+    })
 }
 
 /// The sidebar's short model text (`modelShort` in `src/lib/format.ts`): the last path
@@ -536,6 +539,12 @@ pub async fn execute<R: Runtime>(app: AppHandle<R>, command: Command) -> Result<
             select,
             follow,
         } => {
+            if !Path::new(&path).is_absolute() {
+                return Err(Failure::new(
+                    "invalid_args",
+                    "Document path must be absolute.",
+                ));
+            }
             let item = crate::commands::open_document(path, select, follow).await?;
             Ok(done([("itemId", json!(item))]))
         }

@@ -66,7 +66,7 @@
   }
 </script>
 
-<nav class="outline {variant}" class:menu={variant === "popover"} aria-label="Outline" data-doc-overlay>
+<nav class="outline {variant}" class:menu={variant === "popover"} aria-label="Outline">
   <!-- Arrow keys move between the heading buttons inside. -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <ol bind:this={list} {onkeydown}>

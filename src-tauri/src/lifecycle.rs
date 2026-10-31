@@ -466,8 +466,8 @@ pub fn request_quit<R: Runtime>(app: &AppHandle<R>) {
     }
     let app = app.clone();
     platform::defer_on_main(Box::new(move || {
-        let result = workspace::has_quit_items().and_then(|has_items| {
-            if !has_items {
+        let result = workspace::live_items().and_then(|items| {
+            if items.is_empty() {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = crate::commands::app_quit(app).await {

@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { DocumentEntry, DocumentList } from "../native";
-import { DOCUMENTS_COLLAPSED, documentSection, matchesDocument, typedDocumentPath } from "./palette";
+import {
+  DOCUMENTS_COLLAPSED,
+  defaultEntry,
+  documentProjects,
+  documentSection,
+  editorTarget,
+  matchesDocument,
+  typedDocumentPath,
+} from "./palette";
 
 function entry(name: string, dir: string, modifiedMs: number): DocumentEntry {
   return { path: `/w/atlas/${dir}/${name}`, name, dir, modifiedMs, sizeBytes: 100, openItemId: null };
@@ -71,8 +79,67 @@ describe("a typed Markdown path offers View", () => {
     expect(typedDocumentPath("/tmp/../srv/x.MD", "/w/atlas", "/home/ana")).toBe("/srv/x.MD");
   });
 
-  it("ignores ordinary searches", () => {
+  it("ignores ordinary searches, including a bare file name", () => {
     expect(typedDocumentPath("importer rollover", "/w/atlas", "/home/ana")).toBeNull();
     expect(typedDocumentPath("notes.txt", "/w/atlas", "/home/ana")).toBeNull();
+    expect(typedDocumentPath("report.md", "/w/atlas", "/home/ana")).toBeNull();
+    expect(typedDocumentPath("./report.md", "/w/atlas", "/home/ana")).toBe("/w/atlas/report.md");
+  });
+});
+
+describe("the palette's default cursor", () => {
+  const entries = [
+    { key: "launch", kind: "launch" as const },
+    { key: "path:/w/atlas/docs/report.md", kind: "doc-path" as const },
+    { key: "run:a", kind: "run" as const },
+    { key: "doc:/w/atlas/docs/report.md", kind: "doc" as const },
+  ];
+
+  it("prefers a real match over a typed path", () => {
+    expect(
+      defaultEntry(entries.slice(0, 2).concat(entries[3]), {
+        query: "docs/report.md",
+        focus: undefined,
+        previousKey: null,
+      }),
+    ).toBe("doc:/w/atlas/docs/report.md");
+    expect(defaultEntry(entries.slice(0, 2), { query: "docs/report.md", focus: undefined, previousKey: null })).toBe(
+      "path:/w/atlas/docs/report.md",
+    );
+  });
+
+  it("starts in Documents when opened by the documents chord, else on the previous item", () => {
+    expect(defaultEntry(entries, { query: "", focus: "documents", previousKey: "run:a" })).toBe(
+      "doc:/w/atlas/docs/report.md",
+    );
+    expect(defaultEntry(entries, { query: "", focus: undefined, previousKey: "run:a" })).toBe("run:a");
+    expect(defaultEntry(entries, { query: "", focus: undefined, previousKey: "run:gone" })).toBe("launch");
+  });
+});
+
+describe("Ctrl+↵ on a document row opens Neovim on that file", () => {
+  const recent = { projectId: "atlas", entry: entry("plan.md", "docs", 1) };
+
+  it("uses the open row for a running document and an open recent file, the path otherwise", () => {
+    expect(editorTarget({ kind: "run", item: { id: "d1", kind: "document" } })).toEqual({ itemId: "d1" });
+    expect(editorTarget({ kind: "doc", row: recent })).toEqual({ path: "/w/atlas/docs/plan.md" });
+    expect(editorTarget({ kind: "doc", row: { ...recent, entry: { ...recent.entry, openItemId: "d2" } } })).toEqual({
+      itemId: "d2",
+    });
+    expect(editorTarget({ kind: "doc-path", path: "/w/atlas/x.md" })).toEqual({ path: "/w/atlas/x.md" });
+  });
+
+  it("leaves agents, terminals and other rows to “start new”", () => {
+    expect(editorTarget({ kind: "run", item: { id: "a1", kind: "agent" } })).toBeNull();
+    expect(editorTarget({ kind: "conv" })).toBeNull();
+    expect(editorTarget(null)).toBeNull();
+  });
+});
+
+describe("which projects the palette scans", () => {
+  it("scans only the scoped project, and nothing globally until something is typed", () => {
+    expect(documentProjects("atlas", true, ["atlas", "meridian"])).toEqual(["atlas"]);
+    expect(documentProjects(null, true, ["atlas", "meridian"])).toEqual([]);
+    expect(documentProjects(null, false, ["atlas", "meridian"])).toEqual(["atlas", "meridian"]);
   });
 });

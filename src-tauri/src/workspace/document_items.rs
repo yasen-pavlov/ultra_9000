@@ -99,22 +99,29 @@ pub fn document_path(id: &str) -> Result<String, String> {
             .ok_or_else(|| "Item is not a document.".into())
     })
 }
-pub fn project_document_epoch(project: &str) -> Result<u64, String> {
+pub fn document_scan_context() -> Result<(u64, Vec<PathBuf>), String> {
+    with(|w| Ok((w.epoch, w.settings.roots.clone())))
+}
+pub fn bind_document_entries(entries: &mut [documents::DocumentEntry]) -> Result<(), String> {
     with(|w| {
-        let listed = w
-            .settings
-            .pinned
-            .iter()
-            .any(|path| path == Path::new(project))
-            || w.records.iter().any(|r| r.state.project_id == project);
-        if !listed {
-            return Err("Project does not exist.".into());
+        for entry in entries {
+            entry.open_item_id = w
+                .records
+                .iter()
+                .find(|record| {
+                    record
+                        .state
+                        .document
+                        .as_ref()
+                        .is_some_and(|document| document.path == entry.path)
+                })
+                .map(|record| record.state.id.clone());
         }
-        Ok(w.epoch)
+        Ok(())
     })
 }
 pub fn new_neovim_for_file(id: &str) -> Result<String, String> {
-    let (path, cwd, project, existing) = with(|w| {
+    let (path, cwd, project) = with(|w| {
         let item = &w.records[w.index(id)?].state;
         let path = item
             .document
@@ -122,23 +129,36 @@ pub fn new_neovim_for_file(id: &str) -> Result<String, String> {
             .ok_or("Item is not a document.")?
             .path
             .clone();
+        Ok((path, item.cwd.clone(), item.project_id.clone()))
+    })?;
+    neovim_for_path(path, cwd, project)
+}
+/// Both reader actions and palette entries reuse the same still-live editor.
+pub fn neovim_for_path(path: String, cwd: String, project: String) -> Result<String, String> {
+    let existing = with(|w| {
         let existing = w
             .records
             .iter()
-            .find(|r| {
-                r.state.tool == "neovim"
-                    && r.state.project_id == item.project_id
-                    && matches!(r.state.process, Some(Process::Starting | Process::Running))
-                    && r.extra
+            .find(|record| {
+                record.state.tool == "neovim"
+                    && record.state.project_id == project
+                    && matches!(
+                        record.state.process,
+                        Some(Process::Starting | Process::Running)
+                    )
+                    && record
+                        .extra
                         .as_ref()
                         .is_some_and(|args| args.as_slice() == ["--", path.as_str()])
             })
-            .map(|r| r.state.id.clone());
-        Ok((path, item.cwd.clone(), item.project_id.clone(), existing))
+            .map(|record| record.state.id.clone());
+        if let Some(id) = &existing {
+            w.select(id)?;
+        }
+        Ok(existing)
     })?;
-    if let Some(existing) = existing {
-        select(&existing)?;
-        return Ok(existing);
+    if let Some(id) = existing {
+        return Ok(id);
     }
     begin_launch(
         "neovim".into(),
@@ -167,13 +187,4 @@ pub fn reveal_document(id: &str) -> Result<(), String> {
     })?;
     host.reveal_file(path);
     Ok(())
-}
-
-pub fn has_quit_items() -> Result<bool, String> {
-    with(|w| {
-        Ok(w.records.iter().any(|r| {
-            r.state.document.is_some()
-                || matches!(r.state.process, Some(Process::Starting | Process::Running))
-        }))
-    })
 }

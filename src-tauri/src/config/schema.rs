@@ -77,6 +77,13 @@ pub enum KeepAwake {
     Working,
     Running,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkdownRoute {
+    #[default]
+    View,
+    Neovim,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub default_tool: String,
@@ -96,7 +103,7 @@ pub struct Settings {
     pub confirm_close_with_foreground_job: bool,
     pub confirm_close_unmonitored_agents: bool,
     pub open_elsewhere_hint_seconds: u64,
-    pub markdown: String,
+    pub markdown: MarkdownRoute,
     pub pinned: Vec<PathBuf>,
     pub roots: Vec<PathBuf>,
     pub projects: BTreeMap<PathBuf, ProjectOverride>,
@@ -123,7 +130,7 @@ impl Default for Settings {
             confirm_close_with_foreground_job: true,
             confirm_close_unmonitored_agents: false,
             open_elsewhere_hint_seconds: 120,
-            markdown: "view".into(),
+            markdown: MarkdownRoute::View,
             pinned: vec![],
             roots: vec![],
             projects: BTreeMap::new(),

@@ -36,3 +36,12 @@ export function followAfterAction(follow: boolean, action: DocumentAction, live:
       return follow;
   }
 }
+
+/**
+ * After a reading key moved the view down (j, ↓, d, Space, PageDown, G): reaching the end while the
+ * file is live turns follow on, as reaching it any other way does. Restoring a place after a
+ * re-render is not a reading key and never comes here.
+ */
+export function followAfterKeyScroll(follow: boolean, direction: 1 | -1, atEnd: boolean, live: boolean): boolean {
+  return direction === 1 && atEnd && live ? true : follow;
+}

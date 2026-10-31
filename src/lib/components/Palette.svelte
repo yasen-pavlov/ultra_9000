@@ -20,7 +20,14 @@
     spokenAge,
     tildePath,
   } from "../format";
-  import { documentSection, typedDocumentPath, type DocumentRow } from "../document/palette";
+  import {
+    defaultEntry,
+    documentProjects,
+    documentSection,
+    editorTarget,
+    typedDocumentPath,
+    type DocumentRow,
+  } from "../document/palette";
   import { recentDocuments } from "../document/recent.svelte";
   import { itemView, type ItemView } from "../items";
   import {
@@ -161,10 +168,15 @@
       ),
   );
 
-  // Recent Markdown: the cached lists show at once; each open (and scope change) rescans.
+  // Recent Markdown: the scoped project when the palette opens (or the scope changes); in the global
+  // palette, the sidebar's projects once something is typed. Cached lists show at once.
+  const queryEmpty = $derived(q === "");
   $effect(() => {
-    const projectIds =
-      scope === null ? untrack(() => (workspace.state?.projects ?? []).map((project) => project.id)) : [scope];
+    const projectIds = documentProjects(
+      scope,
+      queryEmpty,
+      untrack(() => (workspace.state?.projects ?? []).map((project) => project.id)),
+    );
     recentDocuments.refresh(projectIds);
   });
 
@@ -253,25 +265,13 @@
   });
   const entryByKey: ReadonlyMap<string, Entry> = $derived(new Map(entries.map((entry) => [entry.key, entry])));
 
-  /**
-   * With a query: the best match. Opened by the documents chord: the newest document. Opened for
-   * "open": the previous item, so ↵ toggles back.
-   */
-  const defaultCursor = $derived.by(() => {
-    if (q !== "") {
-      return (
-        entries.find(
-          (entry) => entry.kind === "doc-path" || entry.kind === "run" || entry.kind === "doc" || entry.kind === "conv",
-        )?.key ?? "launch"
-      );
-    }
-    if (focus === "documents") return entries.find((entry) => entry.kind === "doc")?.key ?? "launch";
-    if (mode === "open" && workspace.previousItemId !== null) {
-      const previous = `run:${workspace.previousItemId}`;
-      if (entryByKey.has(previous)) return previous;
-    }
-    return "launch";
-  });
+  const defaultCursor = $derived(
+    defaultEntry(entries, {
+      query: q,
+      focus,
+      previousKey: mode === "open" && workspace.previousItemId !== null ? `run:${workspace.previousItemId}` : null,
+    }),
+  );
   const cursor = $derived(chosen !== null && entryByKey.has(chosen) ? chosen : defaultCursor);
   const cursorEntry = $derived(entryByKey.get(cursor) ?? null);
 
@@ -358,10 +358,14 @@
     void run("View", () => openDocument(path, true));
   }
 
+  /** The row Ctrl+↵ opens in Neovim (a document in any section), or null when it starts something new. */
+  const editorFor = $derived(editorTarget(cursorEntry));
+
   /** Ctrl+↵ on a document: Neovim on the file, without a reader row unless one is already open. */
-  function neovimDocument(row: DocumentRow): void {
-    const open = row.entry.openItemId;
-    void run("Open in Neovim", () => (open === null ? newNeovimForPath(row.entry.path) : newNeovimForFile(open)));
+  function openInNeovim(target: { itemId: string } | { path: string }): void {
+    void run("Open in Neovim", () =>
+      "itemId" in target ? newNeovimForFile(target.itemId) : newNeovimForPath(target.path),
+    );
   }
 
   function activate(entry: Entry | null): void {
@@ -445,8 +449,8 @@
   function onrootkeydown(event: KeyboardEvent): void {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
       event.preventDefault();
-      if (cursorEntry?.kind === "doc") {
-        neovimDocument(cursorEntry.row);
+      if (editorFor !== null) {
+        openInNeovim(editorFor);
         return;
       }
       chosen = "launch";
@@ -937,9 +941,17 @@
                 onswitch={switchTo}
               />
             {:else if cursorEntry?.kind === "run"}
-              <PaletteDetail conversation={null} item={cursorEntry.item} onresume={resume} onswitch={switchTo} />
+              {@const target = editorFor}
+              <PaletteDetail
+                conversation={null}
+                item={cursorEntry.item}
+                onresume={resume}
+                onswitch={switchTo}
+                onneovim={target === null ? undefined : () => openInNeovim(target)}
+              />
             {:else if cursorEntry?.kind === "doc"}
               {@const row = cursorEntry.row}
+              {@const target = editorFor}
               <PaletteDetail
                 conversation={null}
                 item={null}
@@ -947,7 +959,7 @@
                 onresume={resume}
                 onswitch={switchTo}
                 onview={() => viewDocument(row.entry.path)}
-                onneovim={() => neovimDocument(row)}
+                onneovim={target === null ? undefined : () => openInNeovim(target)}
               />
             {:else}
               <div class="sec">Projects</div>
@@ -970,8 +982,11 @@
 
     <div class="foot">
       <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
-      <span><kbd>↵</kbd> {cursorEntry?.kind === "doc" ? "view" : "start / resume / switch"}</span>
-      <span><kbd>Ctrl+↵</kbd> {cursorEntry?.kind === "doc" ? "Neovim" : "start new"}</span>
+      <span
+        ><kbd>↵</kbd>
+        {cursorEntry?.kind === "doc" || cursorEntry?.kind === "doc-path" ? "view" : "start / resume / switch"}</span
+      >
+      <span><kbd>Ctrl+↵</kbd> {editorFor === null ? "start new" : "Neovim"}</span>
       <span><kbd>Tab</kbd> tool, project, folder</span>
       {#if scope !== null}<span><kbd>Backspace</kbd> on empty: all projects</span>{/if}
       {#if workspace.shortcut("new-terminal") !== null}<span

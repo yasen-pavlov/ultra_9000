@@ -191,7 +191,12 @@
         {/key}
       {:else if activeDocument !== null}
         {#key activeDocument.item.id}
-          <DocumentSurface itemId={activeDocument.item.id} title={activeDocument.item.title} doc={activeDocument.doc} />
+          <DocumentSurface
+            itemId={activeDocument.item.id}
+            title={activeDocument.item.title}
+            doc={activeDocument.doc}
+            presentationEpoch={snapshot.presentationEpoch}
+          />
         {/key}
       {:else if active.process === "starting" || active.process === "failed"}
         <LaunchAttempt item={active} />

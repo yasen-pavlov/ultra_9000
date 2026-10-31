@@ -148,13 +148,8 @@ pub async fn item_launch(
 pub async fn open_document(path: String, select: bool, follow: bool) -> Result<String, String> {
     let settings = on_main_deferred(workspace::settings).await??;
     let (loaded, project) = io(move || {
-        let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
-        let directory = path.parent().ok_or("Document has no directory.")?;
-        let roots = discovery::normalize_roots(&settings.roots);
-        let project = discovery::project_root(directory, &roots);
-        if !roots.is_empty() && !roots.iter().any(|root| project.starts_with(root)) {
-            return Err("Document is outside projects.roots.".into());
-        }
+        let (path, project) = documents::locate(std::path::Path::new(&path), &settings.roots)
+            .map_err(|error| error.to_string())?;
         let loaded = documents::open(&path, &project, follow, workspace::now())?;
         Ok((loaded, project.to_string_lossy().into_owned()))
     })
@@ -166,16 +161,9 @@ pub async fn open_document(path: String, select: bool, follow: bool) -> Result<S
 pub async fn new_neovim_for_path(path: String) -> Result<String, String> {
     let settings = on_main_deferred(workspace::settings).await??;
     let (path, cwd, project) = io(move || {
-        let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
-        if !documents::is_markdown(&path) || !path.is_file() {
-            return Err("Expected a regular Markdown file.".into());
-        }
+        let (path, project) = documents::locate(std::path::Path::new(&path), &settings.roots)
+            .map_err(|error| error.to_string())?;
         let directory = path.parent().ok_or("Document has no directory.")?;
-        let roots = discovery::normalize_roots(&settings.roots);
-        let project = discovery::project_root(directory, &roots);
-        if !roots.is_empty() && !roots.iter().any(|root| project.starts_with(root)) {
-            return Err("Document is outside projects.roots.".into());
-        }
         Ok((
             path.to_string_lossy().into_owned(),
             directory.to_string_lossy().into_owned(),
@@ -183,23 +171,10 @@ pub async fn new_neovim_for_path(path: String) -> Result<String, String> {
         ))
     })
     .await?;
-    on_main_deferred(move || {
-        workspace::begin_launch(
-            "neovim".into(),
-            cwd,
-            project,
-            None,
-            None,
-            None,
-            Some(vec!["--".into(), path]),
-        )
-    })
-    .await?
+    on_main_deferred(move || workspace::neovim_for_path(path, cwd, project)).await?
 }
 #[tauri::command]
 pub async fn document_text(item_id: String) -> Result<DocumentText, String> {
-    let id = item_id.clone();
-    on_main_deferred(move || workspace::document_path(&id)).await??;
     io(move || documents::text(item_id)).await
 }
 #[tauri::command]
@@ -209,41 +184,27 @@ pub async fn document_asset(item_id: String, rel_path: String) -> Result<Documen
 }
 #[tauri::command]
 pub async fn document_reload(item_id: String) -> Result<(), String> {
-    let id = item_id.clone();
-    on_main_deferred(move || workspace::document_path(&id)).await??;
     io(move || documents::reload(item_id)).await
 }
 #[tauri::command]
 pub async fn project_documents(project_id: String) -> Result<DocumentList, String> {
-    let project = project_id.clone();
-    let epoch = on_main_deferred(move || workspace::project_document_epoch(&project)).await??;
+    let (epoch, roots) = on_main_deferred(workspace::document_scan_context).await??;
     let mut list = io(move || {
-        Ok(documents::project_documents(
-            std::path::Path::new(&project_id),
-            epoch,
-        ))
+        let directory = launch::validate_directory(&project_id)?
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let roots = discovery::normalize_roots(&roots);
+        if !roots.is_empty() && !roots.iter().any(|root| directory.starts_with(root)) {
+            return Err("Directory is outside projects.roots.".into());
+        }
+        Ok(documents::project_documents(&directory, epoch))
     })
     .await?;
-    let paths: Vec<_> = list.entries.iter().map(|e| e.path.clone()).collect();
-    let bindings = on_main_deferred(move || {
-        let state = workspace::snapshot()?;
-        Ok::<_, String>(
-            state
-                .items
-                .into_iter()
-                .filter_map(|item| {
-                    item.document
-                        .filter(|doc| paths.contains(&doc.path))
-                        .map(|doc| (doc.path, item.id))
-                })
-                .collect::<std::collections::HashMap<_, _>>(),
-        )
+    on_main_deferred(move || {
+        workspace::bind_document_entries(&mut list.entries)?;
+        Ok::<_, String>(list)
     })
-    .await??;
-    for entry in &mut list.entries {
-        entry.open_item_id = bindings.get(&entry.path).cloned();
-    }
-    Ok(list)
+    .await?
 }
 #[tauri::command]
 pub async fn document_preview(path: String) -> Result<DocumentPreview, String> {

@@ -140,6 +140,9 @@
     </div>
     <div class="acts">
       <button type="button" class="btn pri" onclick={() => onswitch(item)}>Switch<kbd>↵</kbd></button>
+      {#if onneovim !== undefined}
+        <button type="button" class="btn" onclick={onneovim}>Neovim<kbd>Ctrl+↵</kbd></button>
+      {/if}
     </div>
     <p class="note">
       Running here: switching shows its {item.kind === "document" ? "document" : "terminal"}. It is never {item.kind ===

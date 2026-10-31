@@ -2210,7 +2210,7 @@ mod flows {
         let (_, gone) = running(&host, "shell", "/p");
         host.exit(gone, Some(5));
         let live = vec![agent.clone(), shell.clone(), starting.clone()];
-        assert!(has_quit_items().unwrap());
+        assert_eq!(live_items().unwrap(), live);
         open_quit().unwrap();
         assert_eq!(sheet(), json!({"kind":"quit","itemIds":live}));
         close(&starting, false).unwrap();
@@ -2757,7 +2757,7 @@ mod document_flows {
         assert!(
             matches!(snapshot().unwrap().sheet, Some(Sheet::Quit { item_ids }) if item_ids == [shell.clone(), document.clone()] || item_ids == [document.clone(), shell.clone()])
         );
-        assert!(has_quit_items().unwrap());
+        assert_eq!(live_items().unwrap().len(), 1);
         let state = snapshot().unwrap();
         let document_state = state.items.iter().find(|i| i.id == document).unwrap();
         assert_eq!(
@@ -2776,5 +2776,36 @@ mod document_flows {
         let wire = serde_json::to_value(snapshot().unwrap()).unwrap();
         assert_eq!(wire["lastSet"][0]["kind"], "document");
         assert_eq!(wire["lastSet"][0]["conversation"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn document_only_quit_needs_no_process_confirmation_and_skips_missing_last_set_entries() {
+        install();
+        let dir = TempDir::new().unwrap();
+        let kept = open(&dir, "kept.md", true);
+        let missing = open(&dir, "missing.md", true);
+        assert!(
+            live_items().unwrap().is_empty(),
+            "only live processes trigger the quit sheet"
+        );
+        std::fs::remove_file(dir.path().join("missing.md")).unwrap();
+        let mut document = snapshot()
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.id == missing)
+            .unwrap()
+            .document
+            .unwrap();
+        document.status = documents::DocumentStatus::Missing;
+        document.last_event = documents::DocumentEvent::Missing;
+        apply_document(&missing, document);
+        let saved = quit_snapshot().unwrap();
+        assert_eq!(saved.last_set.len(), 1);
+        assert_eq!(
+            saved.last_set[0].path.as_deref(),
+            Some(document_path(&kept).unwrap().as_str())
+        );
+        assert!(snapshot().unwrap().sheet.is_none());
     }
 }

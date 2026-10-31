@@ -8,13 +8,12 @@ function page(html: string): HTMLElement {
 }
 
 describe("find in document", () => {
-  it("marks every case-insensitive match and restores the text when cleared", () => {
-    const root = page(
-      "<p>Temp dirs: the temp name. <code>TEMP</code></p><h2><button data-reader-chrome>#</button>Temp</h2>",
-    );
-    const marks = markMatches(root, "temp");
+  it("marks every case-insensitive match, skips the reader's own controls by identity, and restores the text", () => {
+    const root = page("<p>Temp dirs: the temp name. <code>TEMP</code></p><h2><button>#</button>Temp</h2>");
+    const chrome = new WeakSet<Element>([root.querySelector("button") as Element]);
+    const marks = markMatches(root, "temp", (element) => chrome.has(element));
     expect(marks.map((mark) => mark.textContent)).toEqual(["Temp", "temp", "TEMP", "Temp"]);
-    expect(root.querySelector("[data-reader-chrome] mark")).toBeNull();
+    expect(markMatches(root, "#", (element) => chrome.has(element))).toHaveLength(0);
     clearMatches(root);
     expect(root.querySelector("mark")).toBeNull();
     expect(root.textContent).toBe("Temp dirs: the temp name. TEMP#Temp");

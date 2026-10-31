@@ -1321,6 +1321,9 @@ pub fn quit_snapshot() -> Result<UiStateFile, String> {
             .filter_map(|r| {
                 let item = &r.state;
                 if let Some(document) = &item.document {
+                    if document.status == documents::DocumentStatus::Missing {
+                        return None;
+                    }
                     Some(ui_state::LastSetEntry {
                         kind: ui_state::LastSetKind::Document,
                         path: Some(document.path.clone()),
@@ -1355,6 +1358,20 @@ pub fn cancel_quitting() {
         w.quitting = false;
         Ok(())
     });
+}
+pub fn live_items() -> Result<Vec<String>, String> {
+    with(|w| {
+        Ok(w.records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.state.process,
+                    Some(Process::Starting | Process::Running)
+                )
+            })
+            .map(|record| record.state.id.clone())
+            .collect())
+    })
 }
 pub fn open_quit() -> Result<(), String> {
     with(|w| {
@@ -2041,7 +2058,7 @@ impl Workspace {
                 item: r.state.id.clone(),
                 cwd: r.state.cwd.clone(),
                 project: r.state.project_id.clone(),
-                markdown_view: self.settings.markdown == "view",
+                markdown_view: self.settings.markdown == crate::config::MarkdownRoute::View,
                 roots: self.settings.roots.clone(),
             })
     }
