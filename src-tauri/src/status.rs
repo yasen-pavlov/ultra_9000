@@ -49,6 +49,7 @@ pub enum ItemStatus {
     Starting,
     Exited,
     Activity(Activity),
+    Document,
 }
 
 impl ItemStatus {
@@ -57,20 +58,22 @@ impl ItemStatus {
             Self::Starting => "starting",
             Self::Exited => "exited",
             Self::Activity(activity) => activity.name(),
+            Self::Document => "document",
         }
     }
 }
 
 pub fn item_status(item: &crate::workspace::ItemState) -> ItemStatus {
-    use crate::{config::ToolKind, workspace::Process};
+    use crate::workspace::{ItemKind, Process};
     match item.process {
-        Process::Starting => ItemStatus::Starting,
-        Process::Failed => ItemStatus::Activity(Activity::Error),
-        Process::Exited if item.kind == ToolKind::Agent && item.exit_code != Some(0) => {
+        None => ItemStatus::Document,
+        Some(Process::Starting) => ItemStatus::Starting,
+        Some(Process::Failed) => ItemStatus::Activity(Activity::Error),
+        Some(Process::Exited) if item.kind == ItemKind::Agent && item.exit_code != Some(0) => {
             ItemStatus::Activity(Activity::Error)
         }
-        Process::Exited => ItemStatus::Exited,
-        Process::Running => ItemStatus::Activity(item.activity),
+        Some(Process::Exited) => ItemStatus::Exited,
+        Some(Process::Running) => ItemStatus::Activity(item.activity),
     }
 }
 

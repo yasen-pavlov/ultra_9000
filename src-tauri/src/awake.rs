@@ -31,7 +31,7 @@ pub fn reason(mode: KeepAwake, items: &[ItemState]) -> Option<&'static str> {
         })
         .then_some("an agent is working"),
         KeepAwake::Running => {
-            any(|item| matches!(item.process, Process::Starting | Process::Running))
+            any(|item| matches!(item.process, Some(Process::Starting | Process::Running)))
                 .then_some("items are running")
         }
     }

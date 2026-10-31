@@ -1,8 +1,9 @@
 <script lang="ts">
-  // One palette for switch, resume and start (also the cold-start launcher). Running rows switch;
-  // saved rows resume as a new process; the launch line starts something new. Keys: ↑↓ move,
-  // ↵ open the row, Ctrl+↵ start new, Tab walks the launch line, Backspace on an empty query drops
-  // the project scope, Esc closes a menu first, then the palette.
+  // One palette for switch, view, resume and start (also the cold-start launcher). Running rows
+  // switch; document rows view a recent Markdown file (board 33); saved rows resume as a new
+  // process; the launch line starts something new. Keys: ↑↓ move, ↵ open the row, Ctrl+↵ start new
+  // (Neovim on a document row), Tab walks the launch line, Backspace on an empty query drops the
+  // project scope, Esc closes a menu first, then the palette.
   import { untrack } from "svelte";
   import { clock } from "../clock.svelte";
   import { conversations } from "../conversations.svelte";
@@ -15,10 +16,13 @@
     modelShort,
     recency,
     recencyBucket,
+    shortAge,
     spokenAge,
     tildePath,
   } from "../format";
-  import { itemView } from "../items";
+  import { documentSection, typedDocumentPath, type DocumentRow } from "../document/palette";
+  import { recentDocuments } from "../document/recent.svelte";
+  import { itemView, type ItemView } from "../items";
   import {
     conversationsList,
     errorMessage,
@@ -27,6 +31,9 @@
     itemSelect,
     lastSetDismiss,
     lastSetResume,
+    newNeovimForFile,
+    newNeovimForPath,
+    openDocument,
     sheetClose,
     type Conversation,
     type ConversationList,
@@ -43,11 +50,14 @@
     variant,
     initialScope,
     mode,
+    focus,
   }: {
     /** "launcher": the empty state when nothing is selected (not a sheet; Esc has nowhere to go). */
     variant: "sheet" | "launcher";
     initialScope: string | null;
     mode: "open" | "new";
+    /** "documents": opened by the `documents` chord, the cursor starts in the Documents section. */
+    focus?: "documents";
   } = $props();
 
   const SEARCH_LIMIT = 200;
@@ -59,6 +69,9 @@
     | { key: string; kind: "lastset" }
     | { key: string; kind: "lastset-dismiss" }
     | { key: string; kind: "run"; item: ItemState }
+    | { key: string; kind: "doc-path"; path: string }
+    | { key: string; kind: "doc"; row: DocumentRow }
+    | { key: string; kind: "doc-more" }
     | { key: string; kind: "conv"; conversation: Conversation };
 
   interface SavedSection {
@@ -93,6 +106,7 @@
   let results = $state<HTMLElement | null>(null);
   let guardCancel = $state<HTMLButtonElement | null>(null);
   let launchLine = $state<ReturnType<typeof LaunchLine> | null>(null);
+  let docsExpanded = $state(false);
 
   const home = $derived(workspace.state?.defaultCwd ?? "");
   const active = $derived(workspace.active);
@@ -147,6 +161,31 @@
       ),
   );
 
+  // Recent Markdown: the cached lists show at once; each open (and scope change) rescans.
+  $effect(() => {
+    const projectIds =
+      scope === null ? untrack(() => (workspace.state?.projects ?? []).map((project) => project.id)) : [scope];
+    recentDocuments.refresh(projectIds);
+  });
+
+  const documentLists = $derived(
+    (scope === null ? (workspace.state?.projects ?? []).map((project) => project.id) : [scope]).flatMap((projectId) => {
+      const list = recentDocuments.lists[projectId];
+      return list === undefined ? [] : [{ projectId, list }];
+    }),
+  );
+  const documents = $derived(
+    documentSection(documentLists, { scoped: scope !== null, query: q, expanded: docsExpanded }),
+  );
+  /** A typed path to a Markdown file offers “View” (board 33). */
+  const typedPath = $derived(
+    typedDocumentPath(
+      q,
+      workspace.projectsById.get(scope ?? active?.projectId ?? "")?.path ?? scope ?? active?.projectId ?? home,
+      home,
+    ),
+  );
+
   const inScope: Conversation[] = $derived(
     (conversations.list?.conversations ?? []).filter(
       (conversation) => scope === null || conversation.projectId === scope,
@@ -196,10 +235,15 @@
 
   const entries: Entry[] = $derived.by(() => {
     const list: Entry[] = [{ key: "launch", kind: "launch" }];
+    if (typedPath !== null) list.push({ key: `path:${typedPath}`, kind: "doc-path", path: typedPath });
     if (lastSet !== null && lastSet.length > 0) {
       list.push({ key: "lastset", kind: "lastset" }, { key: "lastset-dismiss", kind: "lastset-dismiss" });
     }
     for (const item of running) list.push({ key: `run:${item.id}`, kind: "run", item });
+    if (documents.visible) {
+      for (const row of documents.rows) list.push({ key: `doc:${row.entry.path}`, kind: "doc", row });
+      if (documents.rows.length < documents.total) list.push({ key: "doc-more", kind: "doc-more" });
+    }
     for (const section of sections) {
       for (const conversation of section.rows) {
         list.push({ key: `conv:${conversation.path}`, kind: "conv", conversation });
@@ -209,9 +253,19 @@
   });
   const entryByKey: ReadonlyMap<string, Entry> = $derived(new Map(entries.map((entry) => [entry.key, entry])));
 
-  /** With a query: the best match. Opened for "open": the previous item, so ↵ toggles back. */
+  /**
+   * With a query: the best match. Opened by the documents chord: the newest document. Opened for
+   * "open": the previous item, so ↵ toggles back.
+   */
   const defaultCursor = $derived.by(() => {
-    if (q !== "") return entries.find((entry) => entry.kind === "run" || entry.kind === "conv")?.key ?? "launch";
+    if (q !== "") {
+      return (
+        entries.find(
+          (entry) => entry.kind === "doc-path" || entry.kind === "run" || entry.kind === "doc" || entry.kind === "conv",
+        )?.key ?? "launch"
+      );
+    }
+    if (focus === "documents") return entries.find((entry) => entry.kind === "doc")?.key ?? "launch";
     if (mode === "open" && workspace.previousItemId !== null) {
       const previous = `run:${workspace.previousItemId}`;
       if (entryByKey.has(previous)) return previous;
@@ -246,6 +300,18 @@
         : `Open in ${scopeName}`,
   );
 
+  /** Board 15 / 29: agents resume as new processes; documents reopen from disk (“and 2 documents”). */
+  const lastSetCounts = $derived.by(() => {
+    const documents = (lastSet ?? []).filter((entry) => entry.kind === "document").length;
+    return { agents: (lastSet?.length ?? 0) - documents, documents };
+  });
+  const lastSetTitle = $derived.by(() => {
+    const { agents, documents } = lastSetCounts;
+    const docs = documents === 1 ? "1 document" : `${documents} documents`;
+    if (agents === 0) return `Reopen the ${docs} from your last quit`;
+    const head = `Resume the ${agents} ${agents === 1 ? "agent" : "agents"}`;
+    return documents === 0 ? `${head} from your last quit` : `${head} and ${docs} from your last quit`;
+  });
   const lastSetSummary = $derived.by(() => {
     if (lastSet === null) return "";
     const counts = new Map<string, number>();
@@ -254,7 +320,11 @@
       counts.set(name, (counts.get(name) ?? 0) + 1);
     }
     const projects = [...counts].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join(", ");
-    return `${projects} · ${lastSet.length} new ${lastSet.length === 1 ? "process" : "processes"}`;
+    const { agents, documents } = lastSetCounts;
+    const parts = [projects];
+    if (agents > 0) parts.push(`${agents} new ${agents === 1 ? "process" : "processes"}`);
+    if (documents > 0) parts.push(`${documents === 1 ? "1 document" : `${documents} documents`} reopened from disk`);
+    return parts.join(" · ");
   });
 
   function move(step: number): void {
@@ -283,6 +353,17 @@
     void run("Switch", () => itemSelect(item.id));
   }
 
+  /** ↵ on a document: view it (native selects the existing row when it is already open). */
+  function viewDocument(path: string): void {
+    void run("View", () => openDocument(path, true));
+  }
+
+  /** Ctrl+↵ on a document: Neovim on the file, without a reader row unless one is already open. */
+  function neovimDocument(row: DocumentRow): void {
+    const open = row.entry.openItemId;
+    void run("Open in Neovim", () => (open === null ? newNeovimForPath(row.entry.path) : newNeovimForFile(open)));
+  }
+
   function activate(entry: Entry | null): void {
     if (entry === null) return;
     chosen = entry.key;
@@ -300,6 +381,20 @@
       case "run":
         switchTo(entry.item);
         break;
+      case "doc-path":
+        viewDocument(entry.path);
+        break;
+      case "doc":
+        viewDocument(entry.row.entry.path);
+        break;
+      case "doc-more": {
+        // Expands in place; the cursor lands on the first row that was hidden.
+        const all = documentSection(documentLists, { scoped: scope !== null, query: q, expanded: true }).rows;
+        const row = all[documents.rows.length];
+        docsExpanded = true;
+        chosen = row === undefined ? null : `doc:${row.entry.path}`;
+        break;
+      }
       case "conv":
         resume(entry.conversation);
         break;
@@ -350,6 +445,10 @@
   function onrootkeydown(event: KeyboardEvent): void {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
       event.preventDefault();
+      if (cursorEntry?.kind === "doc") {
+        neovimDocument(cursorEntry.row);
+        return;
+      }
       chosen = "launch";
       void launchLine?.start();
     } else if (event.key === "Escape" && !event.defaultPrevented) {
@@ -398,11 +497,13 @@
   }
 
   /** Board 11: project · tool · model; the state word only when no pill already shows it. */
-  function runningSub(item: ItemState, stateText: string | null): SubPart[] {
+  function runningSub(item: ItemState, view: ItemView): SubPart[] {
     const parts: SubPart[] = [];
     if (scope === null) parts.push(workspace.projectName(item.projectId));
+    // Board 30: an open document reads project · directory · age (or live); no tool, no pill.
+    if (view.doc !== null) return [...parts, view.doc.dir, view.doc.tail];
     parts.push(workspace.toolLabel(item.tool));
-    if (stateText !== null) parts.push(stateText);
+    if (view.pill === "") parts.push(view.stateText);
     if (item.model !== null) parts.push({ model: item.model, tool: item.tool });
     // Board 28: an agent on job lists its job labels, oldest first.
     if (item.activity === "on-job") parts.push(item.backgroundJobs.map((job) => job.label).join(", "));
@@ -413,7 +514,14 @@
   function runningAct(item: ItemState): string {
     return item.id === active?.id && workspace.state?.view === "sheet" ? "back" : "switch";
   }
+
+  function documentSub(row: DocumentRow): string {
+    const parts = scope === null ? [workspace.projectName(row.projectId)] : [];
+    return [...parts, row.entry.dir, shortAge(row.entry.modifiedMs, clock.now)].join(" · ");
+  }
   const separator = " · ";
+  /** What Esc returns to: the active item's surface. */
+  const surfaceName = $derived(active?.kind === "document" ? "document" : "terminal");
 </script>
 
 {#snippet subLine(parts: SubPart[])}
@@ -440,7 +548,7 @@
     <div class="head">
       <h2>{title}</h2>
       {#if variant === "sheet" && active !== null}
-        <button type="button" class="btn sm ghost back" onclick={close}>Back to terminal<kbd>Esc</kbd></button>
+        <button type="button" class="btn sm ghost back" onclick={close}>Back to {surfaceName}<kbd>Esc</kbd></button>
       {/if}
     </div>
 
@@ -574,6 +682,30 @@
                 {launchName}
               </div>
 
+              {#if typedPath !== null}
+                {@const key = `path:${typedPath}`}
+                <div class="group" role="group" aria-label="View a file">
+                  <div
+                    class="pr"
+                    class:sel={cursor === key}
+                    role="option"
+                    id={optionId(key)}
+                    data-entry={key}
+                    aria-selected={cursor === key}
+                    aria-label="View {tildePath(typedPath, home)}"
+                  >
+                    <ToolTile tool="document" />
+                    <span class="tx">
+                      <span class="t">{typedPath.slice(typedPath.lastIndexOf("/") + 1)}</span>
+                      <span class="s">{tildePath(typedPath.slice(0, typedPath.lastIndexOf("/")) || "/", home)}</span>
+                    </span>
+                    <span class="act"
+                      >{#if cursor === key}<kbd>↵</kbd>{/if}view</span
+                    >
+                  </div>
+                </div>
+              {/if}
+
               {#if lastSet !== null && lastSet.length > 0}
                 <div class="lastset" role="group" aria-label="Last quit">
                   <div
@@ -583,16 +715,11 @@
                     id={optionId("lastset")}
                     data-entry="lastset"
                     aria-selected={cursor === "lastset"}
-                    aria-label="Resume the {lastSet.length} {lastSet.length === 1
-                      ? 'agent'
-                      : 'agents'} from your last quit, {lastSetSummary}"
+                    aria-label="{lastSetTitle}, {lastSetSummary}"
                   >
                     <span class="tile resume-tile"><Icon name="resume" /></span>
                     <span class="tx">
-                      <span class="t"
-                        >Resume the {lastSet.length}
-                        {lastSet.length === 1 ? "agent" : "agents"} from your last quit</span
-                      >
+                      <span class="t">{lastSetTitle}</span>
                       <span class="s">{lastSetSummary}</span>
                     </span>
                     <span class="act"
@@ -622,7 +749,7 @@
                     {@const view = itemView(item, { tool: workspace.tool(item.tool), now: clock.now, home })}
                     {@const key = `run:${item.id}`}
                     {@const dis = workspace.disambiguation.get(item.id) ?? ""}
-                    {@const sub = runningSub(item, view.pill === "" ? view.stateText : null)}
+                    {@const sub = runningSub(item, view)}
                     <div
                       class="pr"
                       class:sel={cursor === key}
@@ -655,6 +782,57 @@
                       >
                     </div>
                   {/each}
+                </div>
+              {/if}
+
+              {#if documents.visible}
+                <div class="sec" aria-hidden="true">
+                  Documents · {documents.rows.length} of {documents.total}<span class="r"
+                    >{documents.truncated ? "recent files only" : "most recently modified first"}</span
+                  >
+                </div>
+                <div class="group" role="group" aria-label="Documents">
+                  {#each documents.rows as row (row.entry.path)}
+                    {@const key = `doc:${row.entry.path}`}
+                    {@const sub = documentSub(row)}
+                    <div
+                      class="pr"
+                      class:sel={cursor === key}
+                      role="option"
+                      id={optionId(key)}
+                      data-entry={key}
+                      aria-selected={cursor === key}
+                      aria-label="{row.entry.name}, {sub}, view"
+                    >
+                      <ToolTile tool="document" />
+                      <span class="tx">
+                        <span class="t"
+                          >{#each highlight(row.entry.name, q) as part, index (index)}{#if part.match}<mark
+                                >{part.text}</mark
+                              >{:else}{part.text}{/if}{/each}</span
+                        >
+                        <span class="s">{sub}</span>
+                      </span>
+                      <span class="act"
+                        >{#if cursor === key}<kbd>↵</kbd> view{:else}{recency(
+                            row.entry.modifiedMs,
+                            clock.now,
+                          )}{/if}</span
+                      >
+                    </div>
+                  {/each}
+                  {#if documents.rows.length < documents.total}
+                    <div
+                      class="pr more"
+                      class:sel={cursor === "doc-more"}
+                      role="option"
+                      id={optionId("doc-more")}
+                      data-entry="doc-more"
+                      aria-selected={cursor === "doc-more"}
+                    >
+                      <span class="tx"><span class="t">Show all {documents.total}</span></span>
+                    </div>
+                  {/if}
                 </div>
               {/if}
 
@@ -732,7 +910,9 @@
             {:else if !searching && saved.length === 0 && !(conversations.list?.scanning ?? false)}
               {#if q !== ""}
                 <div class="empty">
-                  {running.length === 0 ? `Nothing matches “${q}”.` : "No saved conversations match."}
+                  {running.length === 0 && !documents.visible && typedPath === null
+                    ? `Nothing matches “${q}”.`
+                    : "No saved conversations match."}
                 </div>
               {:else if scope !== null}
                 <div class="empty centered">
@@ -758,6 +938,17 @@
               />
             {:else if cursorEntry?.kind === "run"}
               <PaletteDetail conversation={null} item={cursorEntry.item} onresume={resume} onswitch={switchTo} />
+            {:else if cursorEntry?.kind === "doc"}
+              {@const row = cursorEntry.row}
+              <PaletteDetail
+                conversation={null}
+                item={null}
+                document={row.entry}
+                onresume={resume}
+                onswitch={switchTo}
+                onview={() => viewDocument(row.entry.path)}
+                onneovim={() => neovimDocument(row)}
+              />
             {:else}
               <div class="sec">Projects</div>
               {#each conversations.projects as project (project.projectId)}
@@ -779,19 +970,20 @@
 
     <div class="foot">
       <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
-      <span><kbd>↵</kbd> start / resume / switch</span>
-      <span><kbd>Ctrl+↵</kbd> start new</span>
+      <span><kbd>↵</kbd> {cursorEntry?.kind === "doc" ? "view" : "start / resume / switch"}</span>
+      <span><kbd>Ctrl+↵</kbd> {cursorEntry?.kind === "doc" ? "Neovim" : "start new"}</span>
       <span><kbd>Tab</kbd> tool, project, folder</span>
       {#if scope !== null}<span><kbd>Backspace</kbd> on empty: all projects</span>{/if}
       {#if workspace.shortcut("new-terminal") !== null}<span
           ><kbd>{workspace.shortcut("new-terminal")}</kbd> terminal here</span
         >{/if}
-      {#if variant === "sheet"}<span><kbd>Esc</kbd> {active === null ? "close" : "back to terminal"}</span>{/if}
+      {#if variant === "sheet"}<span><kbd>Esc</kbd> {active === null ? "close" : `back to ${surfaceName}`}</span>{/if}
     </div>
   </div>
   {#if variant === "sheet" && active !== null}
     <div class="hidden-note note">
-      <Icon name="panel" small />Terminal hidden while open · Esc returns to “{active.title}”
+      <Icon name="panel" small />{surfaceName === "document" ? "Document" : "Terminal"} hidden while open · Esc returns to
+      “{active.title}”
     </div>
   {/if}
 </div>
@@ -803,6 +995,14 @@
   }
   .palette.launcher {
     padding-top: 36px;
+  }
+  /* “Show all N” expands the Documents section in place (board 33). */
+  .pr.more {
+    min-height: 30px;
+    padding-left: 42px;
+  }
+  .pr.more .t {
+    color: var(--dim);
   }
   .card {
     flex: 1;

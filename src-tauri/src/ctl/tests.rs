@@ -379,3 +379,27 @@ fn only_plain_command_names_are_sent() {
     assert!(!is_command_name(""));
     assert!(!is_command_name("Select"));
 }
+
+#[test]
+fn document_cli_resolves_paths_and_explicit_selection_follow_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("report.md"), "# Report\n").unwrap();
+    let args = document_args("report.md", &[], dir.path()).unwrap();
+    assert_eq!(
+        args["path"],
+        dir.path()
+            .join("report.md")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(args["select"], false);
+    assert_eq!(args["follow"], false);
+    let flags = vec!["--follow".into(), "--select".into()];
+    let args = document_args("./report.md", &flags, dir.path()).unwrap();
+    assert_eq!(args["select"], true);
+    assert_eq!(args["follow"], true);
+    assert!(document_args("report.md", &["--unknown".into()], dir.path()).is_err());
+    assert!(document_args("missing.md", &[], dir.path()).is_err());
+}

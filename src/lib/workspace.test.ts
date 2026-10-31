@@ -1,7 +1,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { deferred, itemState, projectState, settle, toolInfo, workspaceState } from "../test/fixtures";
+import { deferred, documentItem, itemState, projectState, settle, toolInfo, workspaceState } from "../test/fixtures";
 import { clockTime } from "./format";
 import type { WorkspaceState } from "./native";
 import type * as WorkspaceModule from "./workspace.svelte";
@@ -186,6 +186,24 @@ describe("connect", () => {
     );
     return commands;
   }
+
+  it("refreshes the clock when a document row stops being live, not a coarse tick later", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    try {
+      // The clock instance the freshly imported store uses (modules are reset per test).
+      const { clock } = await import("./clock.svelte");
+      mockNative(() => workspaceState({ revision: 2, items: [documentItem({}, { liveUntilMs: 1_005_000 })] }));
+      workspace.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      clock.now = 0;
+      await vi.advanceTimersByTimeAsync(4_900);
+      expect(clock.now).toBe(0);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(clock.now).toBeGreaterThanOrEqual(1_005_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("applies the initial snapshot and remembers the active item's project", async () => {
     const commands = mockNative(() =>

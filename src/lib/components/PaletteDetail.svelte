@@ -1,30 +1,85 @@
 <script lang="ts">
   // Wide-palette detail pane: only what the session file records (or what the running item
-  // reports). Messages, cost and context are never read.
+  // reports). Messages, cost and context are never read. For a recent document: its H1, metadata
+  // and first paragraph, from the first 64 KB only (board 33).
   import { clock } from "../clock.svelte";
-  import { fullDate, modelShort, spokenAge, tildePath } from "../format";
+  import { formatBytes, fullDate, modelShort, spokenAge, tildePath } from "../format";
   import { itemView } from "../items";
-  import type { Conversation, ItemState } from "../native";
+  import {
+    documentPreview,
+    errorMessage,
+    type Conversation,
+    type DocumentEntry,
+    type DocumentPreview,
+    type ItemState,
+  } from "../native";
   import { workspace } from "../workspace.svelte";
   import ProviderMark from "./ProviderMark.svelte";
 
   let {
     conversation,
     item,
+    document = null,
     onresume,
     onswitch,
+    onview,
+    onneovim,
   }: {
     conversation: Conversation | null;
     item: ItemState | null;
+    document?: DocumentEntry | null;
     onresume: (conversation: Conversation) => void;
     onswitch: (item: ItemState) => void;
+    onview?: () => void;
+    onneovim?: () => void;
   } = $props();
 
   const home = $derived(workspace.state?.defaultCwd ?? "");
+
+  let preview = $state<{ path: string; value: DocumentPreview | null; error: string | null } | null>(null);
+
+  // The preview follows the cursor; a late answer for a previous row is dropped.
+  $effect(() => {
+    const path = document?.path ?? null;
+    if (path === null) return;
+    preview = { path, value: null, error: null };
+    documentPreview(path).then(
+      (value) => {
+        if (preview?.path === path) preview = { path, value, error: null };
+      },
+      (error) => {
+        if (preview?.path === path) preview = { path, value: null, error: errorMessage(error) };
+      },
+    );
+  });
+  const shown = $derived(document !== null && preview?.path === document.path ? preview : null);
 </script>
 
 <div class="det" aria-label="Details">
-  {#if conversation !== null}
+  {#if document !== null}
+    {@const headings = shown?.value?.headingCount ?? null}
+    <h3>{shown?.value?.h1 ?? document.name}</h3>
+    <div class="kv">
+      <span class="k">File</span><span class="v">{document.name}</span>
+      <span class="k">Folder</span><span class="v m selectable" title={document.path}>{document.dir}</span>
+      <span class="k">Modified</span><span class="v">{spokenAge(document.modifiedMs, clock.now)} ago</span>
+      <span class="k">Size</span><span class="v"
+        >{formatBytes(document.sizeBytes)}{headings === null
+          ? ""
+          : ` · ${headings} ${headings === 1 ? "heading" : "headings"}`}</span
+      >
+    </div>
+    {#if shown?.error != null}
+      <p class="warn">{shown.error}</p>
+    {:else if shown?.value?.firstParagraph != null}
+      <p class="para selectable">{shown.value.firstParagraph}</p>
+    {/if}
+    <div class="acts">
+      <button type="button" class="btn pri" onclick={onview}>View<kbd>↵</kbd></button>
+      <button type="button" class="btn" onclick={onneovim}>Neovim<kbd>Ctrl+↵</kbd></button>
+    </div>
+    <p class="note">Shown: the file name, its metadata and the first 64 KB. Who wrote it is not known.</p>
+  {:else if conversation !== null}
     <h3>{conversation.title}</h3>
     <div class="kv">
       <span class="k">Project</span><span class="v">{workspace.projectName(conversation.projectId)}</span>
@@ -86,7 +141,12 @@
     <div class="acts">
       <button type="button" class="btn pri" onclick={() => onswitch(item)}>Switch<kbd>↵</kbd></button>
     </div>
-    <p class="note">Running here: switching shows its terminal. It is never resumed twice.</p>
+    <p class="note">
+      Running here: switching shows its {item.kind === "document" ? "document" : "terminal"}. It is never {item.kind ===
+      "document"
+        ? "opened"
+        : "resumed"} twice.
+    </p>
   {/if}
 </div>
 
@@ -144,5 +204,15 @@
     color: var(--dim);
     font-size: 11.5px;
     line-height: 1.45;
+  }
+  .para {
+    margin: 0;
+    color: var(--text);
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-line-clamp: 6;
+    line-clamp: 6;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 </style>

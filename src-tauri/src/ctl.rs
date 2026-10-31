@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-const USAGE: &str = "usage: ultra9000 ctl watch [--client NAME]\n       ultra9000 ctl <command> ['<json args object>']\n";
+const USAGE: &str = "usage: ultra9000 ctl watch [--client NAME]\n       ultra9000 ctl open-document <path> [--select] [--follow]\n       ultra9000 ctl <command> ['<json args object>']\n";
 const DISCONNECTED: &str = "{\"type\":\"disconnected\"}";
 /// First reconnect delay; it doubles up to [`RETRY_MAX`].
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -34,6 +34,36 @@ pub fn main(args: Vec<OsString>) -> i32 {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     match args.as_deref() {
+        Some([command, path, flags @ ..]) if command == "open-document" => {
+            let args =
+                match document_args(path, flags, &std::env::current_dir().unwrap_or_default()) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        eprintln!("ultra9000 ctl: {error}");
+                        return 2;
+                    }
+                };
+            let mut reply = Vec::new();
+            let code = run_command(
+                &mut reply,
+                "open_document",
+                Some(&args.to_string()),
+                connect(&candidates()),
+            );
+            if code == 0 {
+                if let Some(id) = serde_json::from_slice::<Value>(&reply)
+                    .ok()
+                    .and_then(|v| v.get("itemId").and_then(Value::as_str).map(str::to_owned))
+                {
+                    let _ = writeln!(out, "{id}");
+                } else {
+                    let _ = out.write_all(&reply);
+                }
+            } else {
+                let _ = out.write_all(&reply);
+            }
+            code
+        }
         Some([watch, rest @ ..]) if watch == "watch" => {
             let client = match rest {
                 [] => "ctl",
@@ -57,6 +87,19 @@ pub fn main(args: Vec<OsString>) -> i32 {
         }
         _ => usage(),
     }
+}
+
+fn document_args(path: &str, flags: &[String], cwd: &Path) -> Result<Value, String> {
+    if flags
+        .iter()
+        .any(|flag| !matches!(flag.as_str(), "--select" | "--follow"))
+    {
+        return Err("expected --select or --follow".into());
+    }
+    let path = cwd.join(path).canonicalize().map_err(|e| e.to_string())?;
+    Ok(
+        json!({ "path": path, "select": flags.iter().any(|f| f == "--select"), "follow": flags.iter().any(|f| f == "--follow") }),
+    )
 }
 
 fn usage() -> i32 {

@@ -45,6 +45,7 @@ pub(crate) struct FakeHost {
     sessions: RefCell<BTreeMap<SessionKey, Session>>,
     next_key: Cell<SessionKey>,
     file_requests: RefCell<VecDeque<(FileOrigin, String)>>,
+    pub(crate) documents: RefCell<HashMap<String, Loaded>>,
 }
 /// Installs a fresh workspace on the current thread, with an attached terminal host, a
 /// presentable focused window and `/` as default directory. Replaces any previous one.
@@ -68,6 +69,7 @@ pub(crate) fn install() -> Rc<FakeHost> {
         sessions: RefCell::default(),
         next_key: Cell::new(1),
         file_requests: RefCell::default(),
+        documents: RefCell::default(),
     });
     let mut workspace = Workspace::new(host.clone());
     workspace.host_error = None;
@@ -88,7 +90,7 @@ impl FakeHost {
             .borrow_mut()
             .pop_front()
             .expect("no file validation was requested");
-        let target = file_links::validate(&uri, &origin.cwd);
+        let target = file_links::validate_origin(&origin, &uri);
         finish_file_link(origin, target);
     }
     /// Completes the desktop opener without invoking a real application.
@@ -237,6 +239,12 @@ impl Host for FakeHost {
             args,
             linked: link.is_some(),
         });
+    }
+    fn watch_document(&self, id: String, loaded: Loaded) {
+        self.documents.borrow_mut().insert(id, loaded);
+    }
+    fn forget_document(&self, id: String) {
+        self.documents.borrow_mut().remove(&id);
     }
     fn prepare_file(&self, origin: FileOrigin, uri: String) {
         self.file_requests.borrow_mut().push_back((origin, uri));

@@ -12,6 +12,7 @@ pub(super) enum FileTarget {
     Neovim(String),
     System(String),
     Reveal(String),
+    Document(Box<crate::documents::Loaded>, String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -29,11 +30,34 @@ pub(super) struct FileOrigin {
     pub item: String,
     pub cwd: String,
     pub project: String,
+    pub markdown_view: bool,
+    pub roots: Vec<std::path::PathBuf>,
+}
+
+pub(super) fn validate_origin(origin: &FileOrigin, uri: &str) -> Result<FileTarget, String> {
+    let mut target = validate(uri, &origin.cwd, origin.markdown_view)?;
+    if let FileTarget::Document(loaded, project) = &mut target {
+        let directory = std::path::Path::new(&loaded.state.path)
+            .parent()
+            .ok_or("Document has no directory.")?;
+        let roots = crate::discovery::normalize_roots(&origin.roots);
+        let root = crate::discovery::project_root(directory, &roots);
+        if !roots.is_empty() && !roots.iter().any(|prefix| root.starts_with(prefix)) {
+            return Err("Document is outside projects.roots.".into());
+        }
+        *project = root.to_string_lossy().into_owned();
+        loaded.state.dir = directory
+            .strip_prefix(&root)
+            .ok()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map_or_else(|| ".".into(), |path| path.to_string_lossy().into_owned());
+    }
+    Ok(target)
 }
 
 /// Runs off-main. URL decoding happens exactly once through Tauri's existing URL library.
 /// Query/fragment metadata is not a filename and does not become Neovim commands.
-pub(super) fn validate(uri: &str, cwd: &str) -> Result<FileTarget, String> {
+pub(super) fn validate(uri: &str, cwd: &str, markdown_view: bool) -> Result<FileTarget, String> {
     let invalid = || "This file link is not a valid local file URI.".to_owned();
     let bytes = uri.as_bytes();
     for (index, byte) in bytes.iter().enumerate() {
@@ -110,6 +134,13 @@ pub(super) fn validate(uri: &str, cwd: &str) -> Result<FileTarget, String> {
             if std::fs::metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
                 return Err(format!("Cannot open {path}: not a regular file."));
             }
+            if markdown_view
+                && !launcher
+                && !initial_executable
+                && crate::documents::is_markdown(std::path::Path::new(&path))
+            {
+                return document_target(&path);
+            }
             return Ok(uncertain_target(path));
         }
     };
@@ -123,6 +154,13 @@ pub(super) fn validate(uri: &str, cwd: &str) -> Result<FileTarget, String> {
     // Text scripts remain editor data even when executable. Recognized launchers
     // must never reach a default handler that could execute them on a simple click.
     Ok(match inspect_content(&mut file).unwrap_or(Content::Data) {
+        Content::Launchable => FileTarget::Reveal(path),
+        _ if markdown_view
+            && !launcher
+            && crate::documents::is_markdown(std::path::Path::new(&path)) =>
+        {
+            document_target(&path)?
+        }
         Content::Text if !launcher => {
             if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("svg")) {
                 FileTarget::System(path)
@@ -130,13 +168,23 @@ pub(super) fn validate(uri: &str, cwd: &str) -> Result<FileTarget, String> {
                 FileTarget::Neovim(path)
             }
         }
-        Content::Launchable => FileTarget::Reveal(path),
         Content::Recognized if !launcher && !script && extension.is_some() => {
             FileTarget::System(path)
         }
         _ if executable || launcher || script => FileTarget::Reveal(path),
         _ => FileTarget::System(path),
     })
+}
+
+fn document_target(path: &str) -> Result<FileTarget, String> {
+    let path = std::path::Path::new(path);
+    let directory = path.parent().ok_or("Document has no directory.")?;
+    let project = crate::discovery::project_root(directory, &[]);
+    let loaded = crate::documents::open(path, &project, false, crate::workspace::now())?;
+    Ok(FileTarget::Document(
+        Box::new(loaded),
+        project.to_string_lossy().into_owned(),
+    ))
 }
 
 fn inspect_content(reader: &mut impl Read) -> io::Result<Content> {

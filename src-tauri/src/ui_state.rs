@@ -17,14 +17,27 @@ impl Default for UiStateFile {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LastSetKind {
+    #[default]
+    Agent,
+    Document,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastSetEntry {
+    #[serde(default)]
+    pub kind: LastSetKind,
+    #[serde(default)]
+    pub path: Option<String>,
     pub tool: String,
     pub title: String,
     pub project_id: String,
     pub cwd: String,
+    #[serde(default)]
     pub conversation_id: String,
+    #[serde(default)]
     pub conversation_path: String,
 }
 pub fn load(path: &Path) -> UiStateFile {

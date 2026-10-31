@@ -2,7 +2,7 @@
   // A project header (folds on click; keeps an aggregate while folded) and its running items.
   import { clock } from "../clock.svelte";
   import { tildePath } from "../format";
-  import { itemView } from "../items";
+  import { itemView, rowLabel } from "../items";
   import type { ItemState } from "../native";
   import { settings } from "../settings.svelte";
   import { workspace, type ProjectGroup } from "../workspace.svelte";
@@ -44,7 +44,7 @@
       {item}
       {view}
       {dis}
-      label="{view.title}{dis}, {project.name}, {workspace.toolLabel(item.tool)}, {view.stateText}"
+      label={rowLabel(view, dis, project.name, workspace.toolLabel(item.tool))}
       selected={item.id === workspace.state?.activeItemId}
       {compact}
       rovable={roveKey === `row:${item.id}`}

@@ -64,15 +64,27 @@
       >{view.title}{#if dis !== ""}<span class="dis">{dis}</span>{/if}</span
     >
     {#if !compact}
-      <!-- Board 21 (2026-10-04): line 2 is tool · model · age with the state pill at its end. -->
+      <!-- Board 21 (2026-10-04): line 2 is tool · model · age with the state pill at its end.
+           Board 30: a document's line 2 is its directory (cut at the start), then age or “live”. -->
       <span class="sl">
-        <span class="s" class:err={view.subIsError} title={view.tooltip}>{view.sub}</span>
+        {#if view.doc !== null}
+          <span class="s doc" title={view.sub}
+            ><span class="dir">{`\u200e${view.doc.dir}\u200e`}</span><span class="tail"
+              >&nbsp;·&nbsp;{#if view.doc.live}<span class="ld"></span>{/if}{view.doc.tail}</span
+            ></span
+          >
+        {:else}
+          <span class="s" class:err={view.subIsError} title={view.tooltip}>{view.sub}</span>
+        {/if}
         {#if view.pill !== ""}<span class="pill {view.pillClass}">{view.pill}</span>{/if}
       </span>
     {/if}
   </span>
   {#if compact && view.pill !== ""}
     <span class="pill {view.pillClass}" title={view.pillClass === "wait" ? view.tooltip : undefined}>{view.pill}</span>
+  {/if}
+  {#if compact && view.doc?.live === true}
+    <span class="lv"><span class="ld"></span>live</span>
   {/if}
   <button type="button" class="iconbtn x" tabindex="-1" aria-label="Close {view.title}" title="Close" onclick={onclose}>
     <Icon name="close" small />
@@ -155,6 +167,44 @@
   }
   .s.err {
     color: var(--err-text);
+  }
+  /* Board 30: the directory keeps its end (direction: rtl cuts the start, as project paths do). */
+  .s.doc {
+    display: flex;
+    text-overflow: clip;
+  }
+  .s.doc .dir {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl;
+    text-align: left;
+  }
+  .s.doc .tail {
+    flex: none;
+  }
+  /* “live”: a static 5 px dot and the word; no motion, no status colour (board 30). */
+  .ld {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #b0bec5;
+    margin-right: 4px;
+    vertical-align: 1px;
+  }
+  .lv {
+    flex: none;
+    font-size: 11.5px;
+    line-height: 16px;
+    color: var(--dim);
+    pointer-events: none;
+  }
+  .row.gone .t {
+    color: var(--dim);
+  }
+  .row.gone :global(.tile > *) {
+    opacity: 0.55;
   }
   .pill {
     pointer-events: none;

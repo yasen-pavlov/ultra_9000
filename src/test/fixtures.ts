@@ -1,5 +1,13 @@
 // Wire-shaped native snapshots for unit tests; every field defaults to a plausible running state.
-import type { ConversationList, ItemState, ProjectState, SettingsState, ToolInfo, WorkspaceState } from "../lib/native";
+import type {
+  ConversationList,
+  DocumentState,
+  ItemState,
+  ProjectState,
+  SettingsState,
+  ToolInfo,
+  WorkspaceState,
+} from "../lib/native";
 
 export function itemState(overrides: Partial<ItemState> = {}): ItemState {
   return {
@@ -10,6 +18,7 @@ export function itemState(overrides: Partial<ItemState> = {}): ItemState {
     cwd: "/home/ana/w/atlas",
     title: "Fix the parser",
     process: "running",
+    document: null,
     exitCode: null,
     failure: null,
     activity: "unknown",
@@ -24,6 +33,40 @@ export function itemState(overrides: Partial<ItemState> = {}): ItemState {
     backgroundJobs: [],
     ...overrides,
   };
+}
+
+export function documentState(overrides: Partial<DocumentState> = {}): DocumentState {
+  return {
+    path: "/home/ana/w/atlas/docs/reviews/importer-rollover.md",
+    dir: "docs/reviews",
+    status: "ok",
+    error: null,
+    revision: 1,
+    lastEvent: "opened",
+    lastEventAtMs: 0,
+    modifiedMs: 0,
+    sizeBytes: 1024,
+    liveUntilMs: 0,
+    follow: false,
+    ...overrides,
+  };
+}
+
+/** A document row exactly as native sends it (contract decision 2): no process, no status. */
+export function documentItem(overrides: Partial<ItemState> = {}, doc: Partial<DocumentState> = {}): ItemState {
+  const document = documentState(doc);
+  const slash = document.path.lastIndexOf("/");
+  return itemState({
+    id: "doc-1",
+    tool: "document",
+    kind: "document",
+    cwd: document.path.slice(0, slash),
+    title: document.path.slice(slash + 1),
+    process: null,
+    document,
+    pid: null,
+    ...overrides,
+  });
 }
 
 export function toolInfo(overrides: Partial<ToolInfo> = {}): ToolInfo {

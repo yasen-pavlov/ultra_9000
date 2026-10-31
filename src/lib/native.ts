@@ -12,7 +12,63 @@ export type { UnlistenFn };
 // Wire types (frozen; keep identical to the Rust serde types)
 // ---------------------------------------------------------------------------------------------
 
-export type ItemKind = "agent" | "terminal";
+export type ItemKind = "agent" | "terminal" | "document";
+export type DocumentStatus = "ok" | "missing" | "unreadable" | "too-large";
+export type DocumentEvent = "opened" | "updated" | "replaced" | "missing" | "returned";
+
+export interface DocumentState {
+  /** Canonical absolute path at open time; identity. */
+  path: string;
+  /** Directory relative to the project root ("." at the root); "~"-abbreviated absolute dir without a project. */
+  dir: string;
+  status: DocumentStatus;
+  /** Only for "unreadable": the OS error text. */
+  error: string | null;
+  /** Bumps on every successful read; fetch text when it changes. */
+  revision: number;
+  lastEvent: DocumentEvent;
+  lastEventAtMs: number;
+  /** Mtime of the last successful read. */
+  modifiedMs: number;
+  sizeBytes: number;
+  /** Sidebar shows "live" instead of the age until this instant. */
+  liveUntilMs: number;
+  /** Requested by ctl --follow; applied once on first render. */
+  follow: boolean;
+}
+
+export interface DocumentEntry {
+  path: string;
+  name: string;
+  dir: string;
+  modifiedMs: number;
+  sizeBytes: number;
+  openItemId: string | null;
+}
+
+export interface DocumentList {
+  entries: DocumentEntry[];
+  truncated: boolean;
+  scannedAtMs: number;
+}
+
+export interface DocumentPreview {
+  h1: string | null;
+  headingCount: number;
+  firstParagraph: string | null;
+  sizeBytes: number;
+  modifiedMs: number;
+}
+
+export interface DocumentText {
+  revision: number;
+  text: string;
+}
+
+export interface DocumentAsset {
+  mime: string;
+  base64: string;
+}
 export type ProcessState = "starting" | "running" | "exited" | "failed";
 export type Activity = "unknown" | "working" | "needs-you" | "your-turn" | "on-job" | "error";
 export type Attention = "approval" | "question" | null;
@@ -39,7 +95,9 @@ export interface ItemState {
   cwd: string;
   /** Display title, never blank. */
   title: string;
-  process: ProcessState;
+  /** Null exactly for document rows, which own no process. */
+  process: ProcessState | null;
+  document: DocumentState | null;
   exitCode: number | null;
   failure: string | null;
   activity: Activity;
@@ -64,6 +122,7 @@ export interface ProjectState {
   pinned: boolean;
   missing: boolean;
   defaultTool: string;
+  /** Process launch order (anchored terminals follow their source), then document opening order. */
   itemIds: string[];
 }
 
@@ -97,7 +156,7 @@ export interface ToolIcon {
 export type CloseReason = "agent-working" | "agent-needs-you" | "foreground-job" | "neovim" | "unmonitored-agent";
 
 export type Sheet =
-  | { kind: "palette"; projectId: string | null; mode: "open" | "new" }
+  | { kind: "palette"; projectId: string | null; mode: "open" | "new"; focus?: "documents" }
   | { kind: "settings" }
   | { kind: "shortcuts" }
   | { kind: "confirm-close"; itemId: string; reason: CloseReason; detail: string | null }
@@ -105,7 +164,9 @@ export type Sheet =
 
 /** Sheets the web view may open itself; confirmations are opened by native only. */
 export type OpenableSheet =
-  { kind: "palette"; projectId: string | null; mode: "open" | "new" } | { kind: "settings" } | { kind: "shortcuts" };
+  | { kind: "palette"; projectId: string | null; mode: "open" | "new"; focus?: "documents" }
+  | { kind: "settings" }
+  | { kind: "shortcuts" };
 
 export interface Notice {
   id: string;
@@ -118,11 +179,14 @@ export interface Notice {
 }
 
 export interface LastSetEntry {
+  kind: "agent" | "document";
   tool: string;
   title: string;
   projectId: string;
   cwd: string;
-  conversation: ConversationRef;
+  conversation: ConversationRef | null;
+  /** Canonical document path; null for agents. */
+  path: string | null;
 }
 
 export type ShortcutAction =
@@ -131,6 +195,7 @@ export type ShortcutAction =
   | "new-agent"
   | "new-terminal"
   | "new-neovim"
+  | "documents"
   | "close"
   | "jump-waiting"
   | "item-1"
@@ -167,14 +232,14 @@ export interface UiState {
 export interface WorkspaceState {
   revision: number;
   presentationEpoch: number;
-  /** "sheet" ⇔ sheet !== null; the terminal is hidden. */
-  view: "terminal" | "sheet";
+  /** "sheet" ⇔ sheet !== null; "document" when a document is active without a sheet. */
+  view: "terminal" | "document" | "sheet";
   sheet: Sheet | null;
   /** Sidebar order: pinned order, then order of first running item; only pinned or non-empty. */
   projects: ProjectState[];
   items: ItemState[];
   activeItemId: string | null;
-  /** MRU, most recent first, running/exited items only. */
+  /** MRU, most recent first: documents and running/exited process items. */
   recentItemIds: string[];
   tools: ToolInfo[];
   /** Provider id → data URL, for valid `[providers.<id>] icon` overrides only. */
@@ -247,6 +312,7 @@ export type SettingsKey =
   | "terminals.confirm_close_with_foreground_job"
   | "confirm.close_unmonitored_agents"
   | "resume.open_elsewhere_hint_seconds"
+  | "file_links.markdown"
   | "projects.pinned"
   | "terminal.font.size";
 
@@ -419,6 +485,49 @@ export function itemClose(itemId: string, confirmed: boolean): Promise<CloseOutc
   return invoke<CloseOutcome>("item_close", { itemId, confirmed });
 }
 
+/** Opens from disk; canonical identity deduplicates rows. */
+export function openDocument(path: string, select = true, follow = false): Promise<string> {
+  return invoke<string>("open_document", { path, select, follow });
+}
+
+export function documentText(itemId: string): Promise<DocumentText> {
+  return invoke<DocumentText>("document_text", { itemId });
+}
+
+export function documentAsset(itemId: string, relPath: string): Promise<DocumentAsset> {
+  return invoke<DocumentAsset>("document_asset", { itemId, relPath });
+}
+
+export function documentReload(itemId: string): Promise<void> {
+  return invoke<void>("document_reload", { itemId });
+}
+
+export function projectDocuments(projectId: string): Promise<DocumentList> {
+  return invoke<DocumentList>("project_documents", { projectId });
+}
+
+export function documentPreview(path: string): Promise<DocumentPreview> {
+  return invoke<DocumentPreview>("document_preview", { path });
+}
+
+export function newNeovimForFile(itemId: string): Promise<string> {
+  return invoke<string>("new_neovim_for_file", { itemId });
+}
+
+/** Palette editor route without creating a reader row. */
+export function newNeovimForPath(path: string): Promise<string> {
+  return invoke<string>("new_neovim_for_path", { path });
+}
+
+export function revealDocument(itemId: string): Promise<void> {
+  return invoke<void>("reveal_document", { itemId });
+}
+
+/** Opens an external http(s)/mailto link without navigating the privileged web view. */
+export function documentOpenLink(itemId: string, url: string): Promise<void> {
+  return invoke<void>("document_open_link", { itemId, url });
+}
+
 export function noticeDismiss(noticeId: string): Promise<void> {
   return invoke<void>("notice_dismiss", { noticeId });
 }
@@ -427,7 +536,7 @@ export function sheetOpen(sheet: OpenableSheet): Promise<void> {
   return invoke<void>("sheet_open", { sheet });
 }
 
-/** Back to the active item's terminal; closing confirm-close cancels it. */
+/** Back to the active item's surface; closing confirm-close cancels it. */
 export function sheetClose(): Promise<void> {
   return invoke<void>("sheet_close");
 }

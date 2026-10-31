@@ -1,6 +1,5 @@
 //! Platform-independent, app-owned tray presentation (approved board 16).
 use crate::{
-    config::ToolKind,
     shortcuts::Action,
     status::Activity,
     workspace::{ItemState, Process, ProjectState, WorkspaceState},
@@ -52,7 +51,7 @@ impl BarCounts {
     fn from_items(items: &[ItemState]) -> Self {
         let mut counts = Self::default();
         for item in items {
-            if item.process == Process::Running {
+            if item.process == Some(Process::Running) {
                 counts.running += 1;
             }
             use crate::status::{item_status, ItemStatus};
@@ -66,6 +65,7 @@ impl BarCounts {
                 }
                 ItemStatus::Starting
                 | ItemStatus::Exited
+                | ItemStatus::Document
                 | ItemStatus::Activity(Activity::Unknown) => {}
             }
         }
@@ -128,7 +128,7 @@ impl TrayModel {
     ) -> Self {
         let mut running: Vec<_> = items
             .iter()
-            .filter(|i| i.process == Process::Running)
+            .filter(|i| i.process == Some(Process::Running))
             .collect();
         let count = running.len();
         let segments = BarCounts::from_items(items);
@@ -138,7 +138,7 @@ impl TrayModel {
                 0
             } else if i.activity == Activity::YourTurn && i.unread {
                 1
-            } else if i.kind == ToolKind::Agent {
+            } else if i.kind == crate::workspace::ItemKind::Agent {
                 2
             } else {
                 3

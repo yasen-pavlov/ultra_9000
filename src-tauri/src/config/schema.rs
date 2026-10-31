@@ -96,6 +96,7 @@ pub struct Settings {
     pub confirm_close_with_foreground_job: bool,
     pub confirm_close_unmonitored_agents: bool,
     pub open_elsewhere_hint_seconds: u64,
+    pub markdown: String,
     pub pinned: Vec<PathBuf>,
     pub roots: Vec<PathBuf>,
     pub projects: BTreeMap<PathBuf, ProjectOverride>,
@@ -122,6 +123,7 @@ impl Default for Settings {
             confirm_close_with_foreground_job: true,
             confirm_close_unmonitored_agents: false,
             open_elsewhere_hint_seconds: 120,
+            markdown: "view".into(),
             pinned: vec![],
             roots: vec![],
             projects: BTreeMap::new(),
@@ -275,6 +277,7 @@ pub const UI_KEYS: &[&str] = &[
     "terminals.confirm_close_with_foreground_job",
     "confirm.close_unmonitored_agents",
     "resume.open_elsewhere_hint_seconds",
+    "file_links.markdown",
     "projects.pinned",
     "terminal.font.size",
 ];
@@ -329,6 +332,7 @@ pub(crate) fn defaults() -> BTreeMap<Vec<String>, toml::Value> {
         ("terminals.confirm_close_with_foreground_job", true.into()),
         ("confirm.close_unmonitored_agents", false.into()),
         ("resume.open_elsewhere_hint_seconds", 120.into()),
+        ("file_links.markdown", "view".into()),
         ("projects.pinned", toml::Value::Array(vec![])),
         ("projects.roots", toml::Value::Array(vec![])),
         ("terminal.font.size", toml::Value::Float(15.0)),
@@ -390,6 +394,7 @@ pub(crate) fn validate(path: &[String], v: &toml::Value) -> Result<(), String> {
         | "terminals.confirm_close_with_foreground_job"
         | "confirm.close_unmonitored_agents" => (v.is_bool(), "boolean"),
         "resume.open_elsewhere_hint_seconds" => (range(0, 86400), "integer 0–86400"),
+        "file_links.markdown" => (enum_is(&["view", "neovim"]), "view | neovim"),
         "projects.pinned" | "projects.roots" => (
             strings()
                 && v.as_array()

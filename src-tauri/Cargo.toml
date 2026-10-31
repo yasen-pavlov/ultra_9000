@@ -41,6 +41,7 @@ serde_json = "1"
 toml = "1.1"
 toml_edit = "0.25"
 notify = "8"
+ignore = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 base64 = "0.23"
 roxmltree = "0.21"

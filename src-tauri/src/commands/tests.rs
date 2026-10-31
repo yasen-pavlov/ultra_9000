@@ -135,7 +135,7 @@ fn launch_validates_tool_directory_and_roots_before_adding_a_row() {
     let snapshot = state(&app);
     let item = &snapshot.items[0];
     assert_eq!(item.project_id, project, "the git root owns the item");
-    assert_eq!(item.process, Process::Starting);
+    assert_eq!(item.process, Some(Process::Starting));
     assert_eq!(snapshot.active_item_id.as_deref(), Some(id.as_str()));
 }
 
@@ -200,7 +200,7 @@ fn restart_replaces_only_ended_items_in_a_still_valid_directory() {
         "Only exited or failed items can restart."
     );
     host.exit(key, Some(2));
-    assert_eq!(state(&app).items[0].process, Process::Exited);
+    assert_eq!(state(&app).items[0].process, Some(Process::Exited));
 
     let restarted = main.run(item_restart(id.clone())).unwrap();
     assert_ne!(restarted, id);
@@ -271,6 +271,8 @@ fn last_set_resume_reports_failures_skips_running_and_clears_the_set() {
     let shell = launch(&main, "shell", &cwd).unwrap();
     assert_eq!(state(&app).active_item_id.as_deref(), Some(shell.as_str()));
     let entry = |tool: &str, id: &str, path: &str| LastSetEntry {
+        kind: crate::ui_state::LastSetKind::Agent,
+        path: None,
         tool: tool.into(),
         title: "Saved".into(),
         project_id: cwd.clone(),
@@ -466,6 +468,7 @@ fn frontend_ipc_selects_presents_and_dismisses() {
         OpenableSheet::Palette {
             project_id: None,
             mode: PaletteMode::New,
+            focus: None,
         },
     )
     .unwrap();
@@ -536,4 +539,58 @@ fn hiding_and_quitting_need_the_main_window() {
     assert!(app
         .get_webview_window(crate::lifecycle::MAIN_WINDOW)
         .is_some());
+}
+
+#[test]
+fn documents_resume_from_disk_without_starting_a_process() {
+    let (main, host, app) = setup();
+    let dir = Dir::new();
+    let path = dir.0.join("report.md");
+    fs::write(&path, "# Before\n").unwrap();
+    let id = main
+        .run(open_document(
+            path.to_string_lossy().into_owned(),
+            true,
+            false,
+        ))
+        .unwrap();
+    let saved = workspace::quit_snapshot().unwrap();
+    workspace::cancel_quitting();
+    workspace::close(&id, false).unwrap();
+    fs::write(&path, "# After the application quit\n").unwrap();
+    workspace::load_ui(saved);
+    main.run(last_set_resume()).unwrap();
+    let state = state(&app);
+    assert_eq!(state.items.len(), 1);
+    assert_eq!(state.view, "document");
+    assert!(state.last_set.is_none());
+    let document = state.items[0].document.as_ref().unwrap();
+    assert_eq!(
+        document.size_bytes,
+        "# After the application quit\n".len() as u64
+    );
+    assert!(host.prepared.borrow().is_empty());
+}
+
+#[test]
+fn palette_editor_route_does_not_create_a_document_row() {
+    let (main, host, app) = setup();
+    let dir = Dir::new();
+    let path = dir.0.join("report.md");
+    fs::write(&path, "# Report\n").unwrap();
+    let editor = main
+        .run(new_neovim_for_path(path.to_string_lossy().into_owned()))
+        .unwrap();
+    let state = state(&app);
+    assert_eq!(state.items.len(), 1);
+    assert_eq!(state.items[0].id, editor);
+    assert_eq!(state.items[0].tool, "neovim");
+    assert!(state.items[0].document.is_none());
+    assert_eq!(
+        host.prepared.borrow()[0].args,
+        [
+            "--".to_owned(),
+            path.canonicalize().unwrap().to_string_lossy().into_owned()
+        ]
+    );
 }

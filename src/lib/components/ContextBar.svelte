@@ -7,6 +7,7 @@
   import { clock } from "../clock.svelte";
   import { run, uiErrors } from "../errors.svelte";
   import { modelShort } from "../format";
+  import { documentSessions } from "../document/session.svelte";
   import { itemView, onJobNote } from "../items";
   import { itemClose, itemResume, noticeDismiss, type ShortcutAction } from "../native";
   import { workspace } from "../workspace.svelte";
@@ -138,20 +139,31 @@
       <ToolTile tool={active.tool} size={16} />
       <b class="txt">{workspace.projectName(active.projectId)}</b><span class="txt sep">/</span>
       <b class="txt title">{activeView.title}{workspace.disambiguation.get(active.id) ?? ""}</b>
-      <span class="pill {activeView.pillClass === '' ? 'mute' : activeView.pillClass}"
-        >{activeView.pillClass === "job" || activeView.pillClass === "wait"
-          ? activeView.pill
-          : activeView.stateText}</span
-      >
-      {#if active.activity === "on-job"}
-        <span class="jobs" title={activeView.tooltip}>{onJobNote(active)}</span>
-      {:else if active.model !== null}
-        <span class="txt model"><ProviderMark model={active.model} tool={active.tool} inline />{active.model}</span>
+      {#if activeView.doc !== null}
+        <!-- Board 30: directory and H1 (from the reader's parse); no pill, no state colour. -->
+        {@const h1 = documentSessions.h1[active.id] ?? null}
+        <span class="txt docsub">{activeView.doc.dir}{h1 === null ? "" : ` · ${h1}`}</span>
+      {:else}
+        <span class="pill {activeView.pillClass === '' ? 'mute' : activeView.pillClass}"
+          >{activeView.pillClass === "job" || activeView.pillClass === "wait"
+            ? activeView.pill
+            : activeView.stateText}</span
+        >
+        {#if active.activity === "on-job"}
+          <span class="jobs" title={activeView.tooltip}>{onJobNote(active)}</span>
+        {:else if active.model !== null}
+          <span class="txt model"><ProviderMark model={active.model} tool={active.tool} inline />{active.model}</span>
+        {/if}
       {/if}
     {/if}
     {#if messages}{@render message()}{/if}
     {#if active !== null}
       <span class="r">
+        {#if activeView?.doc != null}
+          <span class="txt"
+            >{#if activeView.doc.live}<span class="ld"></span>{/if}{activeView.doc.tail}</span
+          >
+        {/if}
         <button type="button" class="ctxbtn" onclick={() => run("Close", () => itemClose(active.id, false))}>
           Close{#if closeLabel !== null}<kbd>{closeLabel}</kbd>{/if}
         </button>
@@ -219,6 +231,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+  }
+  .docsub {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: inline-block;
+  }
+  .ld {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #b0bec5;
+    margin-right: 5px;
   }
   .notice,
   .cerr {

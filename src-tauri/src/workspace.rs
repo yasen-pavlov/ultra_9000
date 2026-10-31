@@ -25,7 +25,26 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 
+mod document_items;
 mod file_links;
+use crate::documents::{self, DocumentState, Loaded};
+pub use document_items::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemKind {
+    Agent,
+    Terminal,
+    Document,
+}
+impl From<ToolKind> for ItemKind {
+    fn from(kind: ToolKind) -> Self {
+        match kind {
+            ToolKind::Agent => Self::Agent,
+            ToolKind::Terminal => Self::Terminal,
+        }
+    }
+}
 use file_links::{FileOrigin, FileTarget};
 
 pub const WORKSPACE_STATE_EVENT: &str = "workspace-state";
@@ -54,11 +73,12 @@ pub enum Process {
 pub struct ItemState {
     pub id: String,
     pub tool: String,
-    pub kind: ToolKind,
+    pub kind: ItemKind,
     pub project_id: String,
     pub cwd: String,
     pub title: String,
-    pub process: Process,
+    pub process: Option<Process>,
+    pub document: Option<DocumentState>,
     pub exit_code: Option<i32>,
     pub failure: Option<String>,
     pub activity: Activity,
@@ -161,6 +181,8 @@ pub enum OpenableSheet {
     Palette {
         project_id: Option<String>,
         mode: PaletteMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        focus: Option<PaletteFocus>,
     },
     Settings,
     Shortcuts,
@@ -170,6 +192,11 @@ pub enum OpenableSheet {
 pub enum PaletteMode {
     Open,
     New,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaletteFocus {
+    Documents,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(
@@ -181,6 +208,8 @@ pub enum Sheet {
     Palette {
         project_id: Option<String>,
         mode: PaletteMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        focus: Option<PaletteFocus>,
     },
     Settings,
     Shortcuts,
@@ -196,7 +225,15 @@ pub enum Sheet {
 impl From<OpenableSheet> for Sheet {
     fn from(s: OpenableSheet) -> Self {
         match s {
-            OpenableSheet::Palette { project_id, mode } => Self::Palette { project_id, mode },
+            OpenableSheet::Palette {
+                project_id,
+                mode,
+                focus,
+            } => Self::Palette {
+                project_id,
+                mode,
+                focus,
+            },
             OpenableSheet::Settings => Self::Settings,
             OpenableSheet::Shortcuts => Self::Shortcuts,
         }
@@ -216,11 +253,13 @@ pub struct Notice {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastSetEntry {
+    kind: ui_state::LastSetKind,
+    path: Option<String>,
     tool: String,
     title: String,
     project_id: String,
     cwd: String,
-    conversation: ConversationRef,
+    conversation: Option<ConversationRef>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -256,7 +295,7 @@ pub struct WorkspaceState {
 struct Record {
     key: Option<SessionKey>,
     state: ItemState,
-    spec: ToolSpec,
+    spec: Option<ToolSpec>,
     /// OMP items: what the status link reported.
     omp: Option<OmpStatus>,
     raw_title: String,
@@ -301,6 +340,8 @@ trait Host {
     );
     /// Classify a clicked local file off-main, then dispatch on main after rechecking its origin.
     fn prepare_file(&self, origin: FileOrigin, uri: String);
+    fn watch_document(&self, id: String, loaded: Loaded);
+    fn forget_document(&self, id: String);
     /// Open a validated file with the desktop default off-main, reporting failures on main.
     fn open_file(&self, path: String);
     /// Reveal a validated launcher in the file manager off-main, never execute it.
@@ -372,9 +413,15 @@ impl Host for Native {
             platform::defer_on_main(Box::new(move || finish_launch(&id, prepared)));
         });
     }
+    fn watch_document(&self, id: String, loaded: Loaded) {
+        documents::watch(id, loaded);
+    }
+    fn forget_document(&self, id: String) {
+        documents::forget(id);
+    }
     fn prepare_file(&self, origin: FileOrigin, uri: String) {
         std::thread::spawn(move || {
-            let target = file_links::validate(&uri, &origin.cwd);
+            let target = file_links::validate_origin(&origin, &uri);
             platform::defer_on_main(Box::new(move || finish_file_link(origin, target)));
         });
     }
@@ -643,7 +690,7 @@ fn poll_jobs() {
                 record.key,
                 record.state.pid,
             ) {
-                ("shell", Process::Running, Some(key), Some(pid)) => w
+                ("shell", Some(Process::Running), Some(key), Some(pid)) => w
                     .host
                     .foreground_job(key)
                     .filter(|job| u32::try_from(job.pgid).ok() != Some(pid))
@@ -951,7 +998,7 @@ pub fn begin_launch(
         let omp = spec.status == StatusSource::Omp;
         let mut record = Record {
             key: None,
-            spec: spec.clone(),
+            spec: Some(spec.clone()),
             omp: omp.then(OmpStatus::default),
             raw_title: String::new(),
             conversation_title: conversation.as_ref().map(|c| c.title.clone()),
@@ -961,11 +1008,12 @@ pub fn begin_launch(
             state: ItemState {
                 id: id.clone(),
                 tool,
-                kind: spec.kind,
+                kind: spec.kind.into(),
                 project_id: project.clone(),
                 cwd: cwd.clone(),
                 title: spec.label.clone(),
-                process: Process::Starting,
+                process: Some(Process::Starting),
+                document: None,
                 exit_code: None,
                 failure: None,
                 activity: Activity::Unknown,
@@ -1000,7 +1048,7 @@ fn finish_launch(id: &str, prepared: Result<Launch, String>) {
         let Some(index) = w
             .records
             .iter()
-            .position(|r| r.state.id == id && r.state.process == Process::Starting)
+            .position(|r| r.state.id == id && r.state.process == Some(Process::Starting))
         else {
             return Ok(());
         };
@@ -1011,7 +1059,7 @@ fn finish_launch(id: &str, prepared: Result<Launch, String>) {
         match result {
             Ok(key) => {
                 record.key = Some(key);
-                record.state.process = Process::Running;
+                record.state.process = Some(Process::Running);
                 if let Some(state) = w.host.state(key) {
                     record.state.pid = state.pid;
                     record.raw_title = state.title;
@@ -1019,7 +1067,7 @@ fn finish_launch(id: &str, prepared: Result<Launch, String>) {
                 }
             }
             Err(failure) => {
-                record.state.process = Process::Failed;
+                record.state.process = Some(Process::Failed);
                 record.state.failure = Some(failure.clone());
                 if record.omp.is_some() {
                     w.host.unlink(id);
@@ -1047,7 +1095,7 @@ pub type RestartTarget = (
 pub fn restart_target(id: &str) -> Result<RestartTarget, String> {
     with(|w| {
         let r = &w.records[w.index(id)?];
-        if !matches!(r.state.process, Process::Exited | Process::Failed) {
+        if !matches!(r.state.process, Some(Process::Exited | Process::Failed)) {
             return Err("Only exited or failed items can restart.".into());
         }
         let c = r.state.conversation.as_ref().map(|reference| {
@@ -1145,7 +1193,7 @@ pub fn close_reporting(id: &str, confirmed: bool) -> Result<CloseOutcome, String
 fn close_item(id: &str, confirmed: bool, ask_in_app: bool) -> Result<CloseOutcome, String> {
     with(|w| {
         let index = w.index(id)?;
-        if w.records[index].state.process != Process::Running {
+        if w.records[index].state.process != Some(Process::Running) {
             w.remove(index, false)?;
             return Ok(CloseOutcome::Closed);
         }
@@ -1161,7 +1209,10 @@ fn close_item(id: &str, confirmed: bool, ask_in_app: bool) -> Result<CloseOutcom
         if !confirmed {
             if let Some(reason) = close_reason(
                 &record.state,
-                record.spec.status,
+                record
+                    .spec
+                    .as_ref()
+                    .map_or(StatusSource::Process, |s| s.status),
                 &w.settings,
                 job.is_some(),
             ) {
@@ -1199,7 +1250,7 @@ pub fn close_reason(
     settings: &Settings,
     foreground: bool,
 ) -> Option<CloseReason> {
-    if item.process != Process::Running {
+    if item.process != Some(Process::Running) {
         return None;
     }
     if status == StatusSource::Omp {
@@ -1213,7 +1264,7 @@ pub fn close_reason(
         Some(CloseReason::Neovim)
     } else if item.tool == "shell" && foreground && settings.confirm_close_with_foreground_job {
         Some(CloseReason::ForegroundJob)
-    } else if item.kind == ToolKind::Agent
+    } else if item.kind == ItemKind::Agent
         && status != StatusSource::Omp
         && settings.confirm_close_unmonitored_agents
     {
@@ -1267,19 +1318,33 @@ pub fn quit_snapshot() -> Result<UiStateFile, String> {
         w.ui.last_set = w
             .records
             .iter()
-            .filter(|r| r.state.kind == ToolKind::Agent && r.state.process == Process::Running)
             .filter_map(|r| {
-                r.state
-                    .conversation
-                    .as_ref()
-                    .map(|c| ui_state::LastSetEntry {
-                        tool: r.state.tool.clone(),
-                        title: r.state.title.clone(),
-                        project_id: r.state.project_id.clone(),
-                        cwd: r.state.cwd.clone(),
+                let item = &r.state;
+                if let Some(document) = &item.document {
+                    Some(ui_state::LastSetEntry {
+                        kind: ui_state::LastSetKind::Document,
+                        path: Some(document.path.clone()),
+                        tool: item.tool.clone(),
+                        title: item.title.clone(),
+                        project_id: item.project_id.clone(),
+                        cwd: item.cwd.clone(),
+                        conversation_id: String::new(),
+                        conversation_path: String::new(),
+                    })
+                } else if item.kind == ItemKind::Agent && item.process == Some(Process::Running) {
+                    item.conversation.as_ref().map(|c| ui_state::LastSetEntry {
+                        kind: ui_state::LastSetKind::Agent,
+                        path: None,
+                        tool: item.tool.clone(),
+                        title: item.title.clone(),
+                        project_id: item.project_id.clone(),
+                        cwd: item.cwd.clone(),
                         conversation_id: c.id.clone(),
                         conversation_path: c.path.clone(),
                     })
+                } else {
+                    None
+                }
             })
             .collect();
         Ok(w.ui.clone())
@@ -1291,15 +1356,6 @@ pub fn cancel_quitting() {
         Ok(())
     });
 }
-pub fn live_items() -> Result<Vec<String>, String> {
-    with(|w| {
-        Ok(w.records
-            .iter()
-            .filter(|r| matches!(r.state.process, Process::Starting | Process::Running))
-            .map(|r| r.state.id.clone())
-            .collect())
-    })
-}
 pub fn open_quit() -> Result<(), String> {
     with(|w| {
         let before = w.presented();
@@ -1307,7 +1363,10 @@ pub fn open_quit() -> Result<(), String> {
             item_ids: w
                 .records
                 .iter()
-                .filter(|r| matches!(r.state.process, Process::Starting | Process::Running))
+                .filter(|r| {
+                    r.state.document.is_some()
+                        || matches!(r.state.process, Some(Process::Starting | Process::Running))
+                })
                 .map(|r| r.state.id.clone())
                 .collect(),
         });
@@ -1451,6 +1510,9 @@ fn finish_file_link(origin: FileOrigin, target: Result<FileTarget, String>) {
         return;
     };
     let result = match target {
+        Ok(FileTarget::Document(loaded, project)) => {
+            open_document(*loaded, project, true).map(|_| ())
+        }
         Ok(FileTarget::Neovim(path)) => begin_launch(
             "neovim".into(),
             origin.cwd,
@@ -1515,7 +1577,13 @@ fn activity_notice(activity: Activity, settings: &Settings) -> Option<&'static s
     }
 }
 /// Lifecycle fields whose change republishes the workspace.
-type Observed = (Process, Activity, Option<Attention>, Option<u32>, bool);
+type Observed = (
+    Option<Process>,
+    Activity,
+    Option<Attention>,
+    Option<u32>,
+    bool,
+);
 pub fn bind_conversation(item: &str, session: &str, c: Conversation) {
     let _ = with(|w| {
         let Some(r) = w.records.iter_mut().find(|r| {
@@ -1593,6 +1661,21 @@ pub fn dispatch(action: Action) -> Result<(), String> {
             Ok(())
         }
         NewAgent | NewTerminal | NewNeovim => {
+            if action == NewNeovim {
+                if let Some(id) = with(|w| {
+                    Ok(w.active
+                        .as_ref()
+                        .and_then(|id| {
+                            w.records
+                                .iter()
+                                .find(|r| &r.state.id == id && r.state.document.is_some())
+                        })
+                        .map(|r| r.state.id.clone()))
+                })? {
+                    new_neovim_for_file(&id)?;
+                    return Ok(());
+                }
+            }
             let (tool, cwd, anchor) = with(|w| Ok(w.new_item_target(action)))?;
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = crate::commands::launch_item(tool, cwd, anchor, None).await {
@@ -1627,13 +1710,13 @@ pub fn dispatch(action: Action) -> Result<(), String> {
             persist_ui(ui);
             Ok(())
         }
-        Palette | PaletteProject | Settings | Shortcuts => with(|w| {
+        Palette | PaletteProject | Documents | Settings | Shortcuts => with(|w| {
             let before = w.presented();
             w.sheet = Some(match action {
                 Settings => Sheet::Settings,
                 Shortcuts => Sheet::Shortcuts,
                 _ => Sheet::Palette {
-                    project_id: if action == PaletteProject {
+                    project_id: if matches!(action, PaletteProject | Documents) {
                         w.active
                             .as_ref()
                             .and_then(|id| w.records.iter().find(|r| &r.state.id == id))
@@ -1642,6 +1725,7 @@ pub fn dispatch(action: Action) -> Result<(), String> {
                         None
                     },
                     mode: PaletteMode::Open,
+                    focus: (action == Documents).then_some(PaletteFocus::Documents),
                 },
             });
             w.present(before);
@@ -1713,12 +1797,15 @@ pub fn persist_ui(ui: UiStateFile) {
 }
 impl Record {
     fn title(&self) -> String {
+        let Some(spec) = &self.spec else {
+            return self.state.title.clone();
+        };
         derived_title(
-            self.spec.status,
+            spec.status,
             self.omp.as_ref().and_then(|o| o.name.as_deref()),
             &self.raw_title,
             self.conversation_title.as_deref(),
-            &self.spec.label,
+            &spec.label,
         )
     }
     fn observed(&self) -> Observed {
@@ -1736,8 +1823,8 @@ impl Record {
         let title_source_changed = self.omp.is_none() && self.raw_title != state.title;
         self.raw_title = state.title;
         self.state.pid = state.pid;
-        if !state.running && self.state.process == Process::Running {
-            self.state.process = Process::Exited;
+        if !state.running && self.state.process == Some(Process::Running) {
+            self.state.process = Some(Process::Exited);
             self.state.exit_code = state.exit_code;
             if self.state.conversation.is_some() {
                 *discovery_revision += 1;
@@ -1783,8 +1870,8 @@ impl Record {
             )
     }
     fn derived_activity(&self) -> Activity {
-        if self.state.process == Process::Exited
-            && self.state.kind == ToolKind::Agent
+        if self.state.process == Some(Process::Exited)
+            && self.state.kind == ItemKind::Agent
             && self.state.exit_code != Some(0)
         {
             Activity::Error
@@ -1797,11 +1884,11 @@ impl Record {
     }
     /// For an exited item that should leave the sidebar, whether its agent session ended.
     fn exit_removal(&self, remove_on_clean_exit: bool) -> Option<bool> {
-        if self.state.process != Process::Exited {
+        if self.state.process != Some(Process::Exited) {
             return None;
         }
         let clean = self.state.exit_code == Some(0);
-        let agent = self.state.kind == ToolKind::Agent;
+        let agent = self.state.kind == ItemKind::Agent;
         let ended = agent && (self.closing || clean);
         (self.closing || clean && (agent || remove_on_clean_exit)).then_some(ended)
     }
@@ -1891,7 +1978,7 @@ impl Workspace {
     fn ensure_restartable(&self, index: usize) -> Result<(), String> {
         if matches!(
             self.records[index].state.process,
-            Process::Exited | Process::Failed
+            Some(Process::Exited | Process::Failed)
         ) {
             Ok(())
         } else {
@@ -1909,17 +1996,23 @@ impl Workspace {
         if let Some(old) = replacement {
             return self.vacate(&old);
         }
+        let end = self
+            .records
+            .iter()
+            .position(|r| r.state.project_id == project && r.state.kind == ItemKind::Document)
+            .unwrap_or(self.records.len());
         if kind != ToolKind::Terminal {
-            return Ok(self.records.len());
+            return Ok(end);
         }
         Ok(anchor
             .and_then(|id| {
-                self.records
-                    .iter()
-                    .position(|r| r.state.id == id && r.state.project_id == project)
+                self.records.iter().position(|r| {
+                    r.state.id == id
+                        && r.state.project_id == project
+                        && r.state.kind != ItemKind::Document
+                })
             })
-            .map(|i| i + 1)
-            .unwrap_or(self.records.len()))
+            .map_or(end, |i| (i + 1).min(end)))
     }
     /// Drops an exited/failed row being restarted and returns its index.
     fn vacate(&mut self, old: &str) -> Result<usize, String> {
@@ -1948,6 +2041,8 @@ impl Workspace {
                 item: r.state.id.clone(),
                 cwd: r.state.cwd.clone(),
                 project: r.state.project_id.clone(),
+                markdown_view: self.settings.markdown == "view",
+                roots: self.settings.roots.clone(),
             })
     }
     fn apply_host_event(
@@ -1985,7 +2080,7 @@ impl Workspace {
         let Some(index) = self
             .records
             .iter()
-            .position(|r| r.state.id == delivery.item && r.state.process == Process::Running)
+            .position(|r| r.state.id == delivery.item && r.state.process == Some(Process::Running))
         else {
             return Ok(());
         };
@@ -2137,7 +2232,7 @@ impl Workspace {
             if self
                 .records
                 .iter()
-                .any(|r| &r.state.id == id && r.state.process != Process::Failed)
+                .any(|r| &r.state.id == id && r.state.process != Some(Process::Failed))
                 && !self.recent.contains(id)
             {
                 self.recent.insert(0, id.clone());
@@ -2214,6 +2309,9 @@ impl Workspace {
         if self.records[index].state.conversation.is_some() {
             self.discovery_revision += 1;
         }
+        if self.records[index].state.document.is_some() {
+            self.host.forget_document(id.clone());
+        }
         if self.records.remove(index).omp.is_some() {
             self.host.unlink(&id);
         }
@@ -2235,7 +2333,10 @@ impl Workspace {
                 &self
                     .records
                     .iter()
-                    .filter(|r| matches!(r.state.process, Process::Running | Process::Exited))
+                    .filter(|r| {
+                        r.state.document.is_some()
+                            || matches!(r.state.process, Some(Process::Running | Process::Exited))
+                    })
                     .map(|r| r.state.id.clone())
                     .collect::<Vec<_>>(),
             );
@@ -2329,15 +2430,17 @@ impl Workspace {
             .last_set
             .iter()
             .map(|e| LastSetEntry {
+                kind: e.kind,
+                path: e.path.clone(),
                 tool: e.tool.clone(),
                 title: e.title.clone(),
                 project_id: e.project_id.clone(),
                 cwd: e.cwd.clone(),
-                conversation: ConversationRef {
+                conversation: (e.kind == ui_state::LastSetKind::Agent).then(|| ConversationRef {
                     tool: e.tool.clone(),
                     id: e.conversation_id.clone(),
                     path: e.conversation_path.clone(),
-                },
+                }),
             })
             .collect::<Vec<_>>();
         WorkspaceState {
@@ -2345,6 +2448,13 @@ impl Workspace {
             presentation_epoch: self.epoch,
             view: if self.sheet.is_some() {
                 "sheet"
+            } else if self
+                .active
+                .as_ref()
+                .and_then(|id| self.records.iter().find(|r| &r.state.id == id))
+                .is_some_and(|r| r.state.document.is_some())
+            {
+                "document"
             } else {
                 "terminal"
             },
@@ -2379,9 +2489,11 @@ fn recent_running<'a>(
     recent
         .iter()
         .filter(|id| {
-            items
-                .clone()
-                .any(|i| &i.id == *id && matches!(i.process, Process::Running | Process::Exited))
+            items.clone().any(|i| {
+                &i.id == *id
+                    && (i.document.is_some()
+                        || matches!(i.process, Some(Process::Running | Process::Exited)))
+            })
         })
         .cloned()
         .collect()
@@ -2398,7 +2510,7 @@ fn shortcut_cwd(action: Action, active: Option<&ItemState>, default: &str) -> St
         .map_or_else(|| default.to_owned(), Clone::clone)
 }
 fn running_binding(item: &ItemState) -> Option<&ConversationRef> {
-    matches!(item.process, Process::Starting | Process::Running)
+    matches!(item.process, Some(Process::Starting | Process::Running))
         .then_some(item.conversation.as_ref())
         .flatten()
 }
@@ -2418,7 +2530,7 @@ fn retain_recent<'a>(recent: &mut Vec<String>, items: impl Iterator<Item = &'a I
     recent.retain(|id| {
         items
             .clone()
-            .any(|i| &i.id == id && i.process != Process::Failed)
+            .any(|i| &i.id == id && i.process != Some(Process::Failed))
     });
 }
 fn acknowledge_unread(item: &mut ItemState, presented: bool) -> bool {
@@ -2453,7 +2565,7 @@ fn waiting_cycle_order<'a>(
 ) -> Vec<String> {
     let mut items: Vec<_> = items
         .filter(|i| {
-            i.process == Process::Running
+            i.process == Some(Process::Running)
                 && (matches!(i.activity, Activity::NeedsYou(_))
                     || i.activity == Activity::YourTurn && (i.unread || remembered.contains(&i.id)))
         })

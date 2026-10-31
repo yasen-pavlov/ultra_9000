@@ -130,6 +130,13 @@ export function basename(path: string): string {
   return name === "" ? path : name;
 }
 
+/** File sizes as the boards write them: "640 B", "18 KB", "14.2 MB" (1024-based). */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** Two-letter project initials for the collapsed strip ("atlas" → "at"). */
 export function projectInitials(name: string): string {
   const letters = name.replace(/[^\p{L}\p{N}]/gu, "");

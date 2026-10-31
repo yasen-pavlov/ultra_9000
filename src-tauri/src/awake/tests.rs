@@ -1,15 +1,16 @@
 use super::*;
-use crate::{config::ToolKind, status::Attention};
+use crate::status::Attention;
 
 fn item(process: Process, activity: Activity) -> ItemState {
     ItemState {
         id: "item-1".into(),
         tool: "omp".into(),
-        kind: ToolKind::Agent,
+        kind: crate::workspace::ItemKind::Agent,
         project_id: "/p".into(),
         cwd: "/p".into(),
         title: "OMP".into(),
-        process,
+        process: Some(process),
+        document: None,
         exit_code: None,
         failure: None,
         activity,

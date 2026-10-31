@@ -656,6 +656,7 @@ fn apply_setting(s: &mut Settings, p: &[String], v: &toml::Value, sourced: bool)
         "resume.open_elsewhere_hint_seconds" => {
             s.open_elsewhere_hint_seconds = v.as_integer().unwrap() as u64
         }
+        "file_links.markdown" => s.markdown = v.as_str().unwrap().into(),
         "projects.pinned" => s.pinned = strings(v).into_iter().map(PathBuf::from).collect(),
         "projects.roots" => s.roots = strings(v).into_iter().map(PathBuf::from).collect(),
         "terminal.font.size" if sourced => {

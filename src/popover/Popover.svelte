@@ -47,7 +47,10 @@
   const selectedId = $derived(snapshot?.activeItemId ?? null);
   const home = $derived(snapshot?.defaultCwd ?? "");
   const compact = $derived(settings.density === "compact");
-  const groups = $derived(workspace.groups);
+  // The menu bar has no document presence (contract decision 12): its rows and counts are processes only.
+  const groups = $derived(
+    workspace.groups.map((group) => ({ ...group, items: group.items.filter((item) => item.kind !== "document") })),
+  );
   const rows = $derived(groups.flatMap((group) => group.items));
   const liveProjects = $derived(groups.filter((group) => group.items.length > 0).length);
   const pinned = $derived(groups.filter((group) => group.project.pinned).length);

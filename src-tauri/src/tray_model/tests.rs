@@ -5,11 +5,12 @@ fn item(id: &str, activity: Activity, since: u64) -> ItemState {
     ItemState {
         id: id.into(),
         tool: "omp".into(),
-        kind: ToolKind::Agent,
+        kind: crate::workspace::ItemKind::Agent,
         project_id: "atlas".into(),
         cwd: "/atlas".into(),
         title: id.into(),
-        process: Process::Running,
+        process: Some(Process::Running),
+        document: None,
         exit_code: None,
         failure: None,
         activity,
@@ -62,11 +63,11 @@ fn waiting_order_cap_remainder_and_attention() {
 #[test]
 fn agents_precede_terminals_and_use_recent_activity() {
     let mut shell = item("shell", Activity::Unknown, 99);
-    shell.kind = ToolKind::Terminal;
+    shell.kind = crate::workspace::ItemKind::Terminal;
     let mut seen = item("seen", Activity::YourTurn, 80);
     seen.unread = false;
     let mut exited = item("ended", Activity::Unknown, 100);
-    exited.process = Process::Exited;
+    exited.process = Some(Process::Exited);
     let tray = model(
         &[
             shell,
@@ -194,12 +195,12 @@ fn workspace_snapshots_supply_tool_glyphs_and_the_bound_shortcuts() {
 #[test]
 fn menu_bar_segments_exclude_busy_shells_clean_exits_and_seen_turns() {
     let mut shell = item("shell", Activity::Unknown, 0);
-    shell.kind = ToolKind::Terminal;
+    shell.kind = crate::workspace::ItemKind::Terminal;
     let mut exited = item("exited", Activity::Error, 0);
-    exited.process = Process::Exited;
+    exited.process = Some(Process::Exited);
     exited.exit_code = Some(0);
     let mut starting = item("starting", Activity::Working, 0);
-    starting.process = Process::Starting;
+    starting.process = Some(Process::Starting);
     let mut seen = item("seen", Activity::YourTurn, 0);
     seen.unread = false;
     let items = [
@@ -244,16 +245,46 @@ fn menu_bar_segments_include_items_beyond_the_three_menu_rows() {
 fn capsule_errors_match_control_classification_for_failed_launches_and_exits() {
     use crate::status::item_status;
     for (kind, process, code, expected) in [
-        (ToolKind::Agent, Process::Failed, None, "error"),
-        (ToolKind::Terminal, Process::Failed, None, "error"),
-        (ToolKind::Agent, Process::Exited, Some(3), "error"),
-        (ToolKind::Agent, Process::Exited, None, "error"),
-        (ToolKind::Agent, Process::Exited, Some(0), "exited"),
-        (ToolKind::Terminal, Process::Exited, Some(3), "exited"),
+        (
+            crate::workspace::ItemKind::Agent,
+            Process::Failed,
+            None,
+            "error",
+        ),
+        (
+            crate::workspace::ItemKind::Terminal,
+            Process::Failed,
+            None,
+            "error",
+        ),
+        (
+            crate::workspace::ItemKind::Agent,
+            Process::Exited,
+            Some(3),
+            "error",
+        ),
+        (
+            crate::workspace::ItemKind::Agent,
+            Process::Exited,
+            None,
+            "error",
+        ),
+        (
+            crate::workspace::ItemKind::Agent,
+            Process::Exited,
+            Some(0),
+            "exited",
+        ),
+        (
+            crate::workspace::ItemKind::Terminal,
+            Process::Exited,
+            Some(3),
+            "exited",
+        ),
     ] {
         let mut row = item("ended", Activity::Working, 0);
         row.kind = kind;
-        row.process = process;
+        row.process = Some(process);
         row.exit_code = code;
         assert_eq!(item_status(&row).name(), expected);
         let counts = model(&[row], true).segments;

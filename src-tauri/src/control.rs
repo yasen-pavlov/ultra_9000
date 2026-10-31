@@ -14,7 +14,7 @@
 //! and comes back [`TRAY_HANDOVER`] after the last one left.
 use crate::{
     commands::{launch_item, on_main_deferred},
-    config::{ToolKind, TrayShow},
+    config::TrayShow,
     lifecycle, omp_link, platform,
     status::{item_status, Activity, Attention},
     workspace::{
@@ -163,7 +163,12 @@ struct Tray {
 /// Project the workspace in sidebar order: projects as listed, each project's items in launch
 /// order.
 pub fn project<'a>(state: &'a WorkspaceState, context: &Context) -> Snapshot<'a> {
-    let items: HashMap<&str, &ItemState> = state.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    let items: HashMap<&str, &ItemState> = state
+        .items
+        .iter()
+        .filter(|i| i.document.is_none())
+        .map(|i| (i.id.as_str(), i))
+        .collect();
     let active = state.active_item_id.as_deref();
     let projects = state
         .projects
@@ -177,8 +182,14 @@ pub fn project<'a>(state: &'a WorkspaceState, context: &Context) -> Snapshot<'a>
                 .unwrap_or_default(),
             pinned: p.pinned,
             default_tool: &p.default_tool,
-            item_ids: p.item_ids.iter().map(String::as_str).collect(),
+            item_ids: p
+                .item_ids
+                .iter()
+                .filter(|id| items.contains_key(id.as_str()))
+                .map(String::as_str)
+                .collect(),
         })
+        .filter(|p| p.pinned || !p.item_ids.is_empty())
         .collect::<Vec<_>>();
     let items = projects
         .iter()
@@ -203,14 +214,17 @@ pub fn project<'a>(state: &'a WorkspaceState, context: &Context) -> Snapshot<'a>
 
 fn project_item<'a>(state: &'a WorkspaceState, item: &'a ItemState, selected: bool) -> Item<'a> {
     let tool = state.tools.iter().find(|t| t.id == item.tool);
-    let running = item.process == Process::Running;
+    let running = item.process == Some(Process::Running);
     Item {
         id: &item.id,
         project_id: &item.project_id,
         kind: match item.kind {
-            ToolKind::Agent => "agent",
-            ToolKind::Terminal if item.tool == "neovim" => "neovim",
-            ToolKind::Terminal => "shell",
+            workspace::ItemKind::Agent => "agent",
+            workspace::ItemKind::Terminal if item.tool == "neovim" => "neovim",
+            workspace::ItemKind::Terminal => "shell",
+            workspace::ItemKind::Document => {
+                unreachable!("documents are excluded from control snapshots")
+            }
         },
         tool: &item.tool,
         tool_label: tool.map_or(item.tool.as_str(), |t| t.label.as_str()),
@@ -403,6 +417,13 @@ pub enum Command {
         #[serde(default)]
         tool: Option<String>,
     },
+    OpenDocument {
+        path: String,
+        #[serde(default)]
+        select: bool,
+        #[serde(default)]
+        follow: bool,
+    },
     OpenPalette {
         #[serde(default)]
         project_id: Option<String>,
@@ -438,6 +459,7 @@ const COMMANDS: &[&str] = &[
     "jump_to_waiting",
     "set_window_visible",
     "new_item",
+    "open_document",
     "open_palette",
     "close_item",
     "request_quit",
@@ -509,6 +531,14 @@ pub async fn execute<R: Runtime>(app: AppHandle<R>, command: Command) -> Result<
             kind,
             tool,
         } => execute_new_item(project_id, kind, tool).await,
+        Command::OpenDocument {
+            path,
+            select,
+            follow,
+        } => {
+            let item = crate::commands::open_document(path, select, follow).await?;
+            Ok(done([("itemId", json!(item))]))
+        }
         Command::OpenPalette { project_id, mode } => {
             execute_open_palette(app, project_id, mode).await
         }
@@ -620,6 +650,7 @@ async fn execute_open_palette<R: Runtime>(
         workspace::sheet_open(OpenableSheet::Palette {
             project_id,
             mode: mode.unwrap_or(PaletteMode::Open),
+            focus: None,
         })?;
         Ok(Done::new())
     })
