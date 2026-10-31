@@ -19,7 +19,14 @@
   import { documentKey, outlineMode, type DocumentAction } from "../document/keys";
   import { linkTarget } from "../document/links";
   import { renderMermaid } from "../document/mermaid";
-  import { capturePlace, restorePlace, type HeadingTop } from "../document/place";
+  import {
+    HEADING_OFFSET,
+    capturePlace,
+    currentHeadingIndex,
+    headingStep,
+    restorePlace,
+    type HeadingTop,
+  } from "../document/place";
   import type { DocumentHeading, RenderedDocument } from "../document/render";
   import { documentSessions } from "../document/session.svelte";
   import { statusLine } from "../document/status";
@@ -78,7 +85,8 @@
   let fmOpen = $state(false);
   let menuOpen = $state(false);
   let outlineOpen = $state(false);
-  let findOpen = $state(memory.findText !== "");
+  // The bar does not reopen on return; the last query stays as its prefill and for n / N.
+  let findOpen = $state(false);
   let findText = $state(memory.findText);
   let matches = $state.raw<HTMLElement[]>([]);
   let matchIndex = $state(0);
@@ -98,6 +106,10 @@
   /** Set after a successful explicit reload; the next fetch ignores the revision dedupe once. */
   let forceFetch = $state(false);
   let pendingG = false;
+  /** The heading the last `[` / `]` went to, while its scroll may still be moving; any other move clears it. */
+  let headingCursor: number | null = null;
+  /** Height of the notice bar, so the ⋯, find and menus sit below it, never over its buttons. */
+  let noticeHeight = $state(0);
   let programmatic = false;
   let lastTop = 0;
   let observer: IntersectionObserver | null = null;
@@ -146,7 +158,11 @@
       destroyed = true;
       observer?.disconnect();
       diagrams.clear();
-      if (scroller !== null && rendered !== null) memory.place = capturePlace(headingTops(), scroller.scrollTop);
+      // Only a laid-out page can say where the reader is; once detached every heading measures 0,
+      // so the place captured by the last scroll stands.
+      if (scroller?.isConnected === true && scroller.clientHeight > 0 && rendered !== null) {
+        memory.place = capturePlace(headingTops(), scroller.scrollTop);
+      }
     };
   });
 
@@ -257,7 +273,11 @@
     const before =
       rendered === null || scroller === null
         ? null
-        : { place: capturePlace(headingTops(), scroller.scrollTop), lineCount: rendered.lineCount };
+        : {
+            place: capturePlace(headingTops(), scroller.scrollTop),
+            lineCount: rendered.lineCount,
+            atEnd: atEnd(),
+          };
     // Fresh prose DOM for every applied render, so controls and diagrams are set up exactly once
     // per node even when the HTML did not change (an edit to frontmatter only, a reload). The
     // article has no template children, so Svelte never reconciles inside it.
@@ -267,6 +287,8 @@
     rendered = result;
     documentSessions.setH1(itemId, result.h1);
     await tick();
+    // A reader waiting at the end when the file comes alive follows it (board 32).
+    if (reason === "revision" && before?.atEnd === true && doc.liveUntilMs > Date.now()) follow = true;
     if (follow) {
       toEnd();
       return;
@@ -401,15 +423,27 @@
     setScroll(hit.getBoundingClientRect().top - base - scroller.clientHeight / 3);
   }
 
+  /** n / N, also with the bar closed: the last query is marked again on the fly. */
   function stepMatch(direction: 1 | -1): void {
-    if (matches.length === 0) return;
-    matchIndex = (matchIndex + direction + matches.length) % matches.length;
+    if (matches.length === 0) {
+      if (content === null || scroller === null || findText === "") return;
+      matches = markMatches(content, findText, (element) => controls.has(element));
+      if (matches.length === 0) return;
+      const base = scroller.getBoundingClientRect().top - scroller.scrollTop;
+      const first = firstMatchFrom(
+        matches.map((hit) => hit.getBoundingClientRect().top - base),
+        scroller.scrollTop,
+      );
+      matchIndex = direction === 1 ? first : (first - 1 + matches.length) % matches.length;
+    } else {
+      matchIndex = (matchIndex + direction + matches.length) % matches.length;
+    }
     showMatch(true);
   }
 
+  /** Esc in find: the bar closes, the marks go, the reader stays at the match; the query is kept. */
   function closeFind(): void {
     findOpen = false;
-    findText = "";
     scroller?.focus({ preventScroll: true });
   }
 
@@ -421,18 +455,20 @@
     const top = headingTops().find((candidate) => candidate.id === heading.id)?.top;
     if (top === undefined || scroller === null) return;
     if (top < scroller.scrollTop) follow = false;
-    setScroll(top - 8, smooth);
+    setScroll(top - HEADING_OFFSET, smooth);
+    const outlineIds = new Set(outlineEntries.map((entry) => entry.id));
+    const tops = headingTops().filter((candidate) => outlineIds.has(candidate.id));
+    const current = currentHeadingIndex(tops, top - HEADING_OFFSET);
+    currentId = current < 0 ? null : tops[current].id;
   }
 
   function stepHeading(direction: 1 | -1): void {
     if (scroller === null) return;
-    const position = scroller.scrollTop + 8;
     const tops = headingTops();
-    const target =
-      direction === 1
-        ? tops.find((heading) => heading.top > position + 2)
-        : tops.filter((heading) => heading.top < position - 2).at(-1);
-    if (target !== undefined) goHeading(target);
+    const index = headingStep(tops, scroller.scrollTop, headingCursor, direction);
+    if (index === null) return;
+    headingCursor = index;
+    goHeading(tops[index]);
   }
 
   function toggleFollow(): void {
@@ -472,13 +508,19 @@
     scroller?.focus({ preventScroll: true });
   }
 
-  /** Esc closes the topmost open thing: find, then the menu, then a footnote, then the outline popover. */
+  /**
+   * Esc closes the topmost open thing: find, then the menu, then a footnote, then the outline
+   * popover, then marks left by n / N.
+   */
   function escape(): void {
     if (findOpen) closeFind();
     else if (menuOpen) menuOpen = false;
     else if (footnote !== null) footnote = null;
     else if (outlineOpen) outlineOpen = false;
-    else return;
+    else if (matches.length > 0 && content !== null) {
+      clearMatches(content);
+      matches = [];
+    } else return;
     scroller?.focus({ preventScroll: true });
   }
 
@@ -491,6 +533,7 @@
   }
 
   function perform(action: DocumentAction | { kind: DocumentMenuAction }): void {
+    if (action.kind !== "heading") headingCursor = null;
     if (action.kind !== "follow") follow = followAfterAction(follow, action, doc.liveUntilMs > Date.now());
     switch (action.kind) {
       case "scroll": {
@@ -592,11 +635,14 @@
     if (end) linesBelow = 0;
     const tops = headingTops();
     const outlineIds = new Set(outlineEntries.map((entry) => entry.id));
-    currentId = tops.filter((heading) => outlineIds.has(heading.id) && heading.top <= top + 24).at(-1)?.id ?? null;
+    const outlineTops = tops.filter((heading) => outlineIds.has(heading.id));
+    const current = currentHeadingIndex(outlineTops, top);
+    currentId = current < 0 ? null : outlineTops[current].id;
     memory.place = capturePlace(tops, top);
   }
 
   function onwheel(event: WheelEvent): void {
+    headingCursor = null;
     if (event.deltaY < 0) follow = false;
   }
 
@@ -686,37 +732,48 @@
 <!-- keydown is the reading-key router; click/auxclick route links and reader controls for every
      rendered subtree (prose and footnote preview) -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="docsurf" bind:this={root} bind:clientWidth={panelWidth} {onkeydown} {onclick} {onauxclick}>
-  {#if doc.status === "missing"}
-    <div class="notice" role="status">
-      <span class="grow"
-        ><b>No longer at this path</b><span class="muted">{relativePath} · showing the last version read</span></span
-      >
-      <button type="button" class="btn sm" onclick={() => perform({ kind: "reveal" })}>Reveal folder</button>
-      <button type="button" class="btn sm" onclick={() => run("Close", () => itemClose(itemId, false))}>Close</button>
-    </div>
-  {:else if doc.status === "unreadable" || loadError !== null}
-    <div class="notice err" role="alert">
-      <span class="grow"
-        ><b>Can't read this file</b><span class="muted">{doc.error ?? loadError ?? "Unreadable"} · {relativePath}</span
-        ></span
-      >
-      <button type="button" class="btn sm" onclick={() => perform({ kind: "reload" })}>Retry</button>
-      <button type="button" class="btn sm" onclick={() => perform({ kind: "reveal" })}>Reveal folder</button>
-      <button type="button" class="btn sm" onclick={() => run("Close", () => itemClose(itemId, false))}>Close</button>
-    </div>
-  {:else if doc.status === "too-large"}
-    <div class="notice" role="status">
-      <span class="grow"
-        ><b>Too large to show here</b><span class="muted"
-          >{formatBytes(doc.sizeBytes)} · the reader shows files up to 8 MB · {relativePath}</span
-        ></span
-      >
-      <button type="button" class="btn sm" onclick={() => perform({ kind: "neovim" })}>Open in Neovim</button>
-      <button type="button" class="btn sm" onclick={() => perform({ kind: "reveal" })}>Reveal folder</button>
-      <button type="button" class="btn sm" onclick={() => run("Close", () => itemClose(itemId, false))}>Close</button>
-    </div>
-  {/if}
+<div
+  class="docsurf"
+  bind:this={root}
+  bind:clientWidth={panelWidth}
+  style:--chrome-top="{noticeHeight}px"
+  {onkeydown}
+  {onclick}
+  {onauxclick}
+>
+  <div class="notices" bind:clientHeight={noticeHeight}>
+    {#if doc.status === "missing"}
+      <div class="notice" role="status">
+        <span class="grow"
+          ><b>No longer at this path</b><span class="muted">{relativePath} · showing the last version read</span></span
+        >
+        <button type="button" class="btn sm" onclick={() => perform({ kind: "reveal" })}>Reveal folder</button>
+        <button type="button" class="btn sm" onclick={() => run("Close", () => itemClose(itemId, false))}>Close</button>
+      </div>
+    {:else if doc.status === "unreadable" || loadError !== null}
+      <div class="notice err" role="alert">
+        <span class="grow"
+          ><b>Can't read this file</b><span class="muted"
+            >{doc.error ?? loadError ?? "Unreadable"} · {relativePath}</span
+          ></span
+        >
+        <button type="button" class="btn sm" onclick={() => perform({ kind: "reload" })}>Retry</button>
+        <button type="button" class="btn sm" onclick={() => perform({ kind: "reveal" })}>Reveal folder</button>
+        <button type="button" class="btn sm" onclick={() => run("Close", () => itemClose(itemId, false))}>Close</button>
+      </div>
+    {:else if doc.status === "too-large"}
+      <div class="notice" role="status">
+        <span class="grow"
+          ><b>Too large to show here</b><span class="muted"
+            >{formatBytes(doc.sizeBytes)} · the reader shows files up to 8 MB · {relativePath}</span
+          ></span
+        >
+        <button type="button" class="btn sm" onclick={() => perform({ kind: "neovim" })}>Open in Neovim</button>
+        <button type="button" class="btn sm" onclick={() => perform({ kind: "reveal" })}>Reveal folder</button>
+        <button type="button" class="btn sm" onclick={() => run("Close", () => itemClose(itemId, false))}>Close</button>
+      </div>
+    {/if}
+  </div>
   <!-- The scrolling page takes focus so reading keys and Tab start here. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div
@@ -790,6 +847,7 @@
       total={matches.length}
       onstep={stepMatch}
       onclose={closeFind}
+      onleave={() => scroller?.focus({ preventScroll: true })}
     />
   {/if}
   {#if outlineOpen && mode === "popover"}
@@ -847,6 +905,9 @@
       --doc-gap: 16px;
       --doc-top: 24px;
     }
+  }
+  .notices {
+    flex: none;
   }
   .notice {
     display: flex;
@@ -929,7 +990,7 @@
   }
   .more {
     position: absolute;
-    top: 10px;
+    top: calc(var(--chrome-top, 0px) + 10px);
     right: 12px;
     z-index: 3;
     font-size: 16px;
@@ -1172,9 +1233,14 @@
     scrollbar-width: thin;
     scrollbar-color: #3a3a3a transparent;
   }
+  /* The label row: code starts below the language label / Copy, so a long first line is never
+     covered by it. */
+  .prose :global(.code-block pre) {
+    padding-top: 32px;
+  }
   .prose :global(.code-copy) {
     position: absolute;
-    top: 6px;
+    top: 7px;
     right: 10px;
     font-size: 11.5px;
     line-height: 16px;

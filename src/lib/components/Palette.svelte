@@ -1093,6 +1093,9 @@
     min-height: 0;
     flex: 1;
     padding-bottom: 6px;
+    /* Section hints at the right edge stay clear of the scrollbar (thin, overlaid on WebKitGTK). */
+    scrollbar-gutter: stable;
+    padding-right: 8px;
   }
   .results .banner {
     margin: 4px 0;

@@ -34,3 +34,36 @@ export function restorePlace(place: Place, headings: readonly HeadingTop[]): { s
   const heading = headings.find((candidate) => candidate.id === place.id);
   return heading === undefined ? { scrollTop: 0, kept: false } : { scrollTop: heading.top + place.offset, kept: true };
 }
+
+/** Heading jumps (`[`, `]`, the outline) leave the heading this far below the view's top. */
+export const HEADING_OFFSET = 8;
+
+/** The heading the reader is at: the last one at or above the view's top plus the jump offset; -1 = none. */
+export function currentHeadingIndex(headings: readonly HeadingTop[], scrollTop: number): number {
+  let current = -1;
+  headings.forEach((heading, index) => {
+    if (heading.top <= scrollTop + HEADING_OFFSET + 1) current = index;
+  });
+  return current;
+}
+
+/**
+ * The heading `[` / `]` goes to. `cursor` is the heading the previous press went to while its
+ * scroll may still be in flight, so `]]]` moves three headings; without it the view decides. `[`
+ * inside a section goes to that section's heading first.
+ */
+export function headingStep(
+  headings: readonly HeadingTop[],
+  scrollTop: number,
+  cursor: number | null,
+  direction: 1 | -1,
+): number | null {
+  let index: number;
+  if (cursor !== null) index = cursor + direction;
+  else {
+    const current = currentHeadingIndex(headings, scrollTop);
+    const inside = current >= 0 && headings[current].top < scrollTop + HEADING_OFFSET - 2;
+    index = direction === 1 ? current + 1 : inside ? current : current - 1;
+  }
+  return index >= 0 && index < headings.length ? index : null;
+}

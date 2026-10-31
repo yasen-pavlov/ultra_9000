@@ -19,6 +19,7 @@ use std::{
 };
 
 const USAGE: &str = "usage: ultra9000 ctl watch [--client NAME]\n       ultra9000 ctl open-document <path> [--select] [--follow]\n       ultra9000 ctl <command> ['<json args object>']\n";
+const DOCUMENT_USAGE: &str = "usage: ultra9000 ctl open-document <path> [--select] [--follow]\n\n  <path>     Markdown file, relative to the current directory or absolute\n  --select   Select the document\n  --follow   Follow new content\n  --help     Show this help\n";
 const DISCONNECTED: &str = "{\"type\":\"disconnected\"}";
 /// First reconnect delay; it doubles up to [`RETRY_MAX`].
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -34,36 +35,13 @@ pub fn main(args: Vec<OsString>) -> i32 {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     match args.as_deref() {
-        Some([command, path, flags @ ..]) if command == "open-document" => {
-            let args =
-                match document_args(path, flags, &std::env::current_dir().unwrap_or_default()) {
-                    Ok(args) => args,
-                    Err(error) => {
-                        eprintln!("ultra9000 ctl: {error}");
-                        return 2;
-                    }
-                };
-            let mut reply = Vec::new();
-            let code = run_command(
-                &mut reply,
-                "open_document",
-                Some(&args.to_string()),
-                connect(&candidates()),
-            );
-            if code == 0 {
-                if let Some(id) = serde_json::from_slice::<Value>(&reply)
-                    .ok()
-                    .and_then(|v| v.get("itemId").and_then(Value::as_str).map(str::to_owned))
-                {
-                    let _ = writeln!(out, "{id}");
-                } else {
-                    let _ = out.write_all(&reply);
-                }
-            } else {
-                let _ = out.write_all(&reply);
-            }
-            code
-        }
+        Some([command, args @ ..]) if command == "open-document" => run_document(
+            &mut out,
+            &mut io::stderr(),
+            args,
+            &std::env::current_dir().unwrap_or_default(),
+            || connect(&candidates()),
+        ),
         Some([watch, rest @ ..]) if watch == "watch" => {
             let client = match rest {
                 [] => "ctl",
@@ -89,6 +67,59 @@ pub fn main(args: Vec<OsString>) -> i32 {
     }
 }
 
+fn run_document(
+    out: &mut dyn Write,
+    errors: &mut dyn Write,
+    args: &[String],
+    cwd: &Path,
+    connect: impl FnOnce() -> Option<UnixStream>,
+) -> i32 {
+    if args.iter().any(|arg| arg == "--help") {
+        let _ = write!(out, "{DOCUMENT_USAGE}");
+        return 0;
+    }
+    let Some((path, flags)) = args
+        .split_first()
+        .filter(|(path, _)| !path.is_empty() && !matches!(path.as_str(), "--select" | "--follow"))
+    else {
+        let _ = writeln!(
+            errors,
+            "ultra9000 ctl: missing required argument: <path>\n{DOCUMENT_USAGE}"
+        );
+        return 2;
+    };
+    let args = match document_args(path, flags, cwd) {
+        Ok(args) => args,
+        Err(error) => {
+            let _ = writeln!(errors, "ultra9000 ctl: {error}");
+            return 2;
+        }
+    };
+    let mut reply = Vec::new();
+    let code = run_command(
+        &mut reply,
+        "open_document",
+        Some(&args.to_string()),
+        connect(),
+    );
+    if code == 0 {
+        if let Some(id) = serde_json::from_slice::<Value>(&reply)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("itemId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        {
+            let _ = writeln!(out, "{id}");
+            return code;
+        }
+    }
+    let _ = out.write_all(&reply);
+    code
+}
+
 fn document_args(path: &str, flags: &[String], cwd: &Path) -> Result<Value, String> {
     if flags
         .iter()
@@ -96,7 +127,10 @@ fn document_args(path: &str, flags: &[String], cwd: &Path) -> Result<Value, Stri
     {
         return Err("expected --select or --follow".into());
     }
-    let path = cwd.join(path).canonicalize().map_err(|e| e.to_string())?;
+    let requested = cwd.join(path);
+    let path = requested
+        .canonicalize()
+        .map_err(|error| format!("Cannot open {}: {error}", requested.display()))?;
     Ok(
         json!({ "path": path, "select": flags.iter().any(|f| f == "--select"), "follow": flags.iter().any(|f| f == "--follow") }),
     )

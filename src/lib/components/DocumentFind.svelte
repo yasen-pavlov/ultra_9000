@@ -1,7 +1,8 @@
 <script lang="ts">
   // Find in document (board 34): the palette's field style, top right of the reader. ↵ / Shift+↵
-  // step (n / N in the page do too), Esc closes and keeps the reader at the current match. Owns the
-  // keyboard while focused: the page's reading keys are inert.
+  // step (n / N in the page do too), Esc closes and keeps the reader at the current match, Tab
+  // hands the keyboard back to the page with the bar still open. Owns the keyboard while focused:
+  // the page's reading keys are inert. Opens with the last query selected, ready to replace.
   import Icon from "./Icon.svelte";
 
   let {
@@ -10,6 +11,7 @@
     total,
     onstep,
     onclose,
+    onleave,
   }: {
     query: string;
     /** 0-based index of the current match; meaningless when total is 0. */
@@ -17,6 +19,8 @@
     total: number;
     onstep: (direction: 1 | -1) => void;
     onclose: () => void;
+    /** Tab: focus goes back to the page; the bar stays. */
+    onleave: () => void;
   } = $props();
 
   let input = $state<HTMLInputElement | null>(null);
@@ -27,12 +31,13 @@
   }
 
   $effect(() => {
-    input?.focus();
+    focus();
   });
 
   function onkeydown(event: KeyboardEvent): void {
     if (event.key === "Enter") onstep(event.shiftKey ? -1 : 1);
     else if (event.key === "Escape") onclose();
+    else if (event.key === "Tab") onleave();
     else return;
     event.preventDefault();
     event.stopPropagation();
@@ -58,7 +63,7 @@
 <style>
   .find {
     position: absolute;
-    top: 12px;
+    top: calc(var(--chrome-top, 0px) + 12px);
     right: 48px;
     z-index: 4;
     width: 280px;

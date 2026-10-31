@@ -277,4 +277,73 @@ describe("keyboard", () => {
     key(reader(), "j");
     expect(target.querySelector(".line")?.textContent).toContain("following");
   });
+
+  it("follows when the file comes alive while the reader waits at its end", async () => {
+    texts[1] = "# Log\n\nrun 1";
+    const props: Props = $state({
+      itemId: "d1",
+      title: "a.md",
+      doc: documentState({ revision: 1 }),
+      presentationEpoch: 1,
+    });
+    show(props);
+    await until(() => prose().querySelector("h1") !== null);
+    expect(target.querySelector(".line")?.textContent ?? "").not.toContain("following");
+    texts[2] = "# Log\n\nrun 1\n\nrun 2";
+    served = 2;
+    const now = Date.now();
+    props.doc = documentState({ revision: 2, liveUntilMs: now + 5_000, lastEvent: "updated", lastEventAtMs: now });
+    await until(() => target.querySelector(".line")?.textContent?.includes("following") === true);
+  });
+
+  it("does not reopen find on return, and n steps through the last query from the page", async () => {
+    texts[1] = "# Title\n\nalpha beta alpha";
+    show({ itemId: "d1", title: "a.md", doc: documentState({ revision: 1 }), presentationEpoch: 1 });
+    await until(() => prose().querySelector("h1") !== null);
+    key(reader(), "/");
+    const input = target.querySelector<HTMLInputElement>(".find input") as HTMLInputElement;
+    input.value = "alpha";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await until(() => prose().querySelectorAll("mark.find-hit").length === 2);
+    // Tab hands the keyboard to the page, the bar stays.
+    key(input, "Tab");
+    expect(document.activeElement).toBe(reader());
+    expect(target.querySelector(".find")).not.toBeNull();
+    key(reader(), "Escape");
+    await until(() => prose().querySelector("mark") === null);
+    hide();
+    show({ itemId: "d1", title: "a.md", doc: documentState({ revision: 1 }), presentationEpoch: 2 });
+    await until(() => prose().querySelector("h1") !== null);
+    expect(target.querySelector(".find")).toBeNull();
+    key(reader(), "n");
+    expect(prose().querySelectorAll("mark.find-hit")).toHaveLength(2);
+    expect(prose().querySelectorAll("mark.find-hit.cur")).toHaveLength(1);
+    key(reader(), "/");
+    expect(target.querySelector<HTMLInputElement>(".find input")?.value).toBe("alpha");
+  });
+});
+
+describe("place across switching", () => {
+  // jsdom has no layout: headings measure from their source line (100 px per line), so places can
+  // be captured and restored. restoreMocks puts the original back after each test.
+  beforeEach(() => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function rect(this: Element): DOMRect {
+      const line = Number(this.getAttribute("data-line") ?? "0");
+      const scrolled = this.closest(".reader")?.scrollTop ?? 0;
+      const top = this.isConnected && line > 0 ? line * 100 - scrolled : 0;
+      return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) };
+    });
+  });
+
+  it("returns to the same heading and offset after another item was shown", async () => {
+    texts[1] = "# A\n\n## B\n\n## C\n\n## D";
+    show({ itemId: "d1", title: "a.md", doc: documentState({ revision: 1 }), presentationEpoch: 1 });
+    await until(() => prose().querySelectorAll("h2").length === 3);
+    reader().scrollTop = 350; // 50 px into “B” (line 3)
+    reader().dispatchEvent(new Event("scroll"));
+    hide();
+    show({ itemId: "d1", title: "a.md", doc: documentState({ revision: 1 }), presentationEpoch: 2 });
+    await until(() => reader().scrollTop === 350);
+    expect(documentSessions.memory("d1").place).toEqual({ id: "user-content-b", offset: 50 });
+  });
 });

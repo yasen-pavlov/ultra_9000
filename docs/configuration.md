@@ -84,7 +84,7 @@ ultra9000 ctl open-document ./docs/report.md
 ultra9000 ctl open-document ./docs/report.md --select --follow
 ```
 
-The CLI prints the item ID. `--select` switches to it; `--follow` asks the reader to follow new content. Last-set resume reopens documents from disk alongside resumable agents.
+The CLI prints the item ID. `--select` switches to it; `--follow` asks the reader to follow new content. `ultra9000 ctl open-document --help` explains the arguments without connecting to the app. Last-set resume reopens documents from disk alongside resumable agents.
 
 ## Keyboard shortcuts
 

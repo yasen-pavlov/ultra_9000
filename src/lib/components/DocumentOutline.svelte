@@ -128,7 +128,7 @@
     scrollbar-width: none;
   }
   .popover {
-    top: 40px;
+    top: calc(var(--chrome-top, 0px) + 40px);
     right: 12px;
     width: 280px;
     padding: 8px 8px 8px 4px;

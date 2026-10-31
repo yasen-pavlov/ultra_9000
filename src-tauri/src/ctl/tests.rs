@@ -403,3 +403,75 @@ fn document_cli_resolves_paths_and_explicit_selection_follow_flags() {
     assert!(document_args("report.md", &["--unknown".into()], dir.path()).is_err());
     assert!(document_args("missing.md", &[], dir.path()).is_err());
 }
+
+#[test]
+fn document_cli_help_prints_usage_and_exits_successfully_without_connecting() {
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    let code = run_document(
+        &mut out,
+        &mut errors,
+        &["--help".into()],
+        Path::new("/missing-cwd"),
+        || panic!("help must not connect"),
+    );
+    assert_eq!(code, 0);
+    assert!(errors.is_empty());
+    let help = String::from_utf8(out).unwrap();
+    for expected in [
+        "usage: ultra9000 ctl open-document",
+        "<path>",
+        "--select",
+        "--follow",
+    ] {
+        assert!(help.contains(expected), "{help}");
+    }
+}
+
+#[test]
+fn document_cli_missing_path_names_the_argument_and_exits_with_usage_error() {
+    for args in [vec![], vec!["--select".into()], vec!["--follow".into()]] {
+        let mut out = Vec::new();
+        let mut errors = Vec::new();
+        let code = run_document(
+            &mut out,
+            &mut errors,
+            &args,
+            Path::new("/missing-cwd"),
+            || panic!("missing arguments must not connect"),
+        );
+        assert_eq!(code, 2);
+        assert!(out.is_empty());
+        let error = String::from_utf8(errors).unwrap();
+        assert!(
+            error.contains("missing required argument: <path>"),
+            "{error}"
+        );
+        assert!(
+            error.contains("usage: ultra9000 ctl open-document"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn document_cli_os_errors_include_the_requested_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    let code = run_document(
+        &mut out,
+        &mut errors,
+        &["missing.md".into()],
+        dir.path(),
+        || panic!("failed path resolution must not connect"),
+    );
+    assert_eq!(code, 2);
+    assert!(out.is_empty());
+    let error = String::from_utf8(errors).unwrap();
+    assert!(
+        error.contains(&dir.path().join("missing.md").display().to_string()),
+        "{error}"
+    );
+    assert!(error.contains("Cannot open"), "{error}");
+}

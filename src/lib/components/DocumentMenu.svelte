@@ -85,7 +85,7 @@
 
 <style>
   .doc-menu {
-    top: 40px;
+    top: calc(var(--chrome-top, 0px) + 40px);
     right: 12px;
     width: 250px;
     max-height: none;

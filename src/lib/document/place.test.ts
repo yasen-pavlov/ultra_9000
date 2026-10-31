@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capturePlace, restorePlace } from "./place";
+import { capturePlace, currentHeadingIndex, headingStep, restorePlace } from "./place";
 
 const before = [
   { id: "user-content-summary", top: 0 },
@@ -34,5 +34,33 @@ describe("place keeping across a re-render", () => {
     const place = capturePlace(headings, 120);
     expect(place).toEqual({ id: null, offset: 120 });
     expect(restorePlace(place, [{ id: "user-content-summary", top: 900 }])).toEqual({ scrollTop: 120, kept: true });
+  });
+});
+
+describe("headings and the reader's position", () => {
+  const headings = [
+    { id: "a", top: 0 },
+    { id: "b", top: 400 },
+    { id: "c", top: 900 },
+    { id: "d", top: 1500 },
+  ];
+
+  it("counts the heading a jump just landed on (8 px below the top) as the current one", () => {
+    expect(currentHeadingIndex(headings, 392)).toBe(1);
+    expect(currentHeadingIndex(headings, 300)).toBe(0);
+  });
+
+  it("moves one heading per press, even while the previous jump is still scrolling", () => {
+    const first = headingStep(headings, 0, null, 1);
+    expect(first).toBe(1);
+    const second = headingStep(headings, 10, first, 1);
+    const third = headingStep(headings, 30, second, 1);
+    expect([second, third]).toEqual([2, 3]);
+    expect(headingStep(headings, 30, third, 1)).toBeNull();
+  });
+
+  it("goes back to the current section's heading first, then to the one before", () => {
+    expect(headingStep(headings, 600, null, -1)).toBe(1);
+    expect(headingStep(headings, 392, null, -1)).toBe(0);
   });
 });
