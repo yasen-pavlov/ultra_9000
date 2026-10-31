@@ -22,6 +22,10 @@ pub(crate) struct FakeHost {
     /// Every other app event (`conversations-changed`, `settings-state`), in order.
     pub(crate) events: RefCell<Vec<(String, serde_json::Value)>>,
     pub(crate) prepared: RefCell<Vec<Prepared>>,
+    /// Validated paths sent to the system opener, pending completion.
+    pub(crate) system_files: RefCell<VecDeque<String>>,
+    /// Validated launchers sent to the file manager, pending completion.
+    pub(crate) revealed_files: RefCell<VecDeque<String>>,
     /// Session effects in order: `create 1`, `stop 1`, `remove 1`, `hide 1`,
     /// `viewport 1 true`, `focus 1`, `reload`, `focus-sidebar`.
     pub(crate) calls: RefCell<Vec<String>>,
@@ -49,6 +53,8 @@ pub(crate) fn install() -> Rc<FakeHost> {
         published: RefCell::default(),
         events: RefCell::default(),
         prepared: RefCell::default(),
+        system_files: RefCell::default(),
+        revealed_files: RefCell::default(),
         calls: RefCell::default(),
         notifications: RefCell::default(),
         keep_awake: RefCell::default(),
@@ -82,8 +88,23 @@ impl FakeHost {
             .borrow_mut()
             .pop_front()
             .expect("no file validation was requested");
-        let args = file_links::validate(&uri, &origin.cwd);
-        finish_file_link(origin, args);
+        let target = file_links::validate(&uri, &origin.cwd);
+        finish_file_link(origin, target);
+    }
+    /// Completes the desktop opener without invoking a real application.
+    pub(crate) fn complete_system_file(&self, result: Result<(), String>) {
+        self.system_files
+            .borrow_mut()
+            .pop_front()
+            .expect("no system file open was requested");
+        finish_system_file(result);
+    }
+    pub(crate) fn complete_reveal_file(&self, result: Result<(), String>) {
+        self.revealed_files
+            .borrow_mut()
+            .pop_front()
+            .expect("no file reveal was requested");
+        finish_system_file(result);
     }
     /// Completes a prepared launch: the session starts running.
     pub(crate) fn complete(&self, id: &str) -> SessionKey {
@@ -219,6 +240,12 @@ impl Host for FakeHost {
     }
     fn prepare_file(&self, origin: FileOrigin, uri: String) {
         self.file_requests.borrow_mut().push_back((origin, uri));
+    }
+    fn open_file(&self, path: String) {
+        self.system_files.borrow_mut().push_back(path);
+    }
+    fn reveal_file(&self, path: String) {
+        self.revealed_files.borrow_mut().push_back(path);
     }
     fn link(&self, item: &str) -> Option<Credentials> {
         self.links.borrow_mut().push(format!("link {item}"));

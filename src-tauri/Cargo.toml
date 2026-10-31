@@ -45,6 +45,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 base64 = "0.23"
 roxmltree = "0.21"
 png = "0.18"
+infer = "0.22"
 
 # Alacritty's renderer/input/event processing hosted in native views (NSView on macOS,
 # GTK/Wayland on Linux; modified upstream copy at def47a5dd511ed20607eb5d9e5e7140afd16b31d,
@@ -131,8 +132,8 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3.6"
 tokio = { version = "1", features = ["sync"] }
-# The session bus for desktop notifications (with click actions) and the system bus for the
-# logind keep-awake inhibitor; the same zbus ksni already uses.
+# The session bus for desktop notifications and FileManager1 reveal, and the system
+# bus for the logind keep-awake inhibitor; the same zbus ksni already uses.
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 # The GTK 3 bindings Tauri itself uses (same version): dialogs, folder chooser, window
 # shortcuts and the WebKitWebView handle of the terminal host.

@@ -26,7 +26,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 
 mod file_links;
-use file_links::FileOrigin;
+use file_links::{FileOrigin, FileTarget};
 
 pub const WORKSPACE_STATE_EVENT: &str = "workspace-state";
 pub fn now() -> u64 {
@@ -299,8 +299,12 @@ trait Host {
         args: Vec<String>,
         link: Option<Credentials>,
     );
-    /// Validate a clicked local file off-main, then launch it on main after rechecking its origin.
+    /// Classify a clicked local file off-main, then dispatch on main after rechecking its origin.
     fn prepare_file(&self, origin: FileOrigin, uri: String);
+    /// Open a validated file with the desktop default off-main, reporting failures on main.
+    fn open_file(&self, path: String);
+    /// Reveal a validated launcher in the file manager off-main, never execute it.
+    fn reveal_file(&self, path: String);
     /// Status-link credentials for an OMP launch of `item`, if the link runs.
     fn link(&self, item: &str) -> Option<Credentials>;
     /// Invalidate `item`'s status-link token.
@@ -370,8 +374,20 @@ impl Host for Native {
     }
     fn prepare_file(&self, origin: FileOrigin, uri: String) {
         std::thread::spawn(move || {
-            let args = file_links::validate(&uri, &origin.cwd);
-            platform::defer_on_main(Box::new(move || finish_file_link(origin, args)));
+            let target = file_links::validate(&uri, &origin.cwd);
+            platform::defer_on_main(Box::new(move || finish_file_link(origin, target)));
+        });
+    }
+    fn open_file(&self, path: String) {
+        std::thread::spawn(move || {
+            let result = runtime::open_file(Path::new(&path));
+            platform::defer_on_main(Box::new(move || finish_system_file(result)));
+        });
+    }
+    fn reveal_file(&self, path: String) {
+        std::thread::spawn(move || {
+            let result = runtime::reveal_file(Path::new(&path));
+            platform::defer_on_main(Box::new(move || finish_system_file(result)));
         });
     }
     fn link(&self, item: &str) -> Option<Credentials> {
@@ -1425,24 +1441,41 @@ fn flush_host_events() {
         }
     }
 }
-fn finish_file_link(origin: FileOrigin, args: Result<Vec<String>, String>) {
+fn finish_file_link(origin: FileOrigin, target: Result<FileTarget, String>) {
     // Session identity, not current selection, determines both the cwd and sidebar anchor.
-    // Main-thread execution makes this check and begin_launch atomic with respect to close/quit.
-    let current = with(|w| Ok(w.file_link_origin(origin.key).as_ref() == Some(&origin)));
-    if current != Ok(true) {
+    // Main-thread execution makes this check and either dispatch atomic with close/quit.
+    let host = with(|w| {
+        Ok((w.file_link_origin(origin.key).as_ref() == Some(&origin)).then(|| w.host.clone()))
+    });
+    let Ok(Some(host)) = host else {
         return;
-    }
-    let result = args.and_then(|args| {
-        begin_launch(
+    };
+    let result = match target {
+        Ok(FileTarget::Neovim(path)) => begin_launch(
             "neovim".into(),
             origin.cwd,
             origin.project,
             None,
             Some(origin.item),
             None,
-            Some(args),
+            Some(vec!["--".into(), path]),
         )
-    });
+        .map(|_| ()),
+        Ok(FileTarget::System(path)) => {
+            host.open_file(path);
+            Ok(())
+        }
+        Ok(FileTarget::Reveal(path)) => {
+            host.reveal_file(path);
+            Ok(())
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        action_error(error);
+    }
+}
+fn finish_system_file(result: Result<(), String>) {
     if let Err(error) = result {
         action_error(error);
     }

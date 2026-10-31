@@ -462,18 +462,100 @@ fn desired_watches(home: &Path, settings: &Settings) -> Vec<(PathBuf, RecursiveM
 const OPENER: &str = "xdg-open";
 #[cfg(target_os = "macos")]
 const OPENER: &str = "open";
+/// Spawn the desktop opener with a literal path argument, never shell source.
+fn spawn_opener(path: &Path, opener: &str, args: &[&str]) -> Result<std::process::Child, String> {
+    std::process::Command::new(opener)
+        .args(args)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())
+}
+/// Called on a worker: reap the opener and report missing-handler failures. In generic
+/// mode xdg-open can wait for the viewer to exit; these files are not app-owned sessions.
+pub(crate) fn open_file(path: &Path) -> Result<(), String> {
+    open_file_with(path, OPENER, &[])
+}
+fn open_file_with(path: &Path, opener: &str, args: &[&str]) -> Result<(), String> {
+    let status = spawn_opener(path, opener, args)
+        .and_then(|mut child| child.wait().map_err(|e| e.to_string()))
+        .map_err(|e| format!("Could not open {} with {opener}: {e}", path.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not open {}: {opener} {status}",
+            path.display()
+        ))
+    }
+}
+/// Launchable files are shown in the file manager, never passed to their default handler.
+#[cfg(target_os = "macos")]
+pub(crate) fn reveal_file(path: &Path) -> Result<(), String> {
+    open_file_with(path, OPENER, &["-R"])
+}
+#[cfg(target_os = "linux")]
+pub(crate) fn reveal_file(path: &Path) -> Result<(), String> {
+    reveal_file_with(path, zbus::blocking::connection::Builder::session(), OPENER)
+}
+#[cfg(target_os = "linux")]
+fn reveal_file_with(
+    path: &Path,
+    builder: zbus::Result<zbus::blocking::connection::Builder<'_>>,
+    opener: &str,
+) -> Result<(), String> {
+    let uri = tauri::Url::from_file_path(path)
+        .map_err(|()| format!("Could not reveal {}: invalid absolute path", path.display()))?;
+    let shown = builder
+        .and_then(|builder| {
+            builder
+                .method_timeout(std::time::Duration::from_secs(25))
+                .build()
+        })
+        .and_then(|connection| {
+            connection
+                .call_method(
+                    Some("org.freedesktop.FileManager1"),
+                    "/org/freedesktop/FileManager1",
+                    Some("org.freedesktop.FileManager1"),
+                    "ShowItems",
+                    // zvariant encodes fixed Rust arrays as structs; ShowItems needs `as`.
+                    &([uri.as_str()].as_slice(), ""),
+                )?
+                .body()
+                .deserialize::<()>()
+        });
+    match shown {
+        Ok(()) => return Ok(()),
+        Err(zbus::Error::MethodError(name, _, _))
+            if matches!(
+                name.as_str(),
+                "org.freedesktop.DBus.Error.ServiceUnknown"
+                    | "org.freedesktop.DBus.Error.UnknownMethod"
+                    | "org.freedesktop.DBus.Error.NameHasNoOwner"
+            ) => {}
+        Err(error) => {
+            return Err(format!("Could not reveal {}: {error}", path.display()));
+        }
+    }
+    // Missing/unsupported file-manager service: only open the containing directory.
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "Could not reveal {}: no containing directory",
+            path.display()
+        )
+    })?;
+    open_file_with(parent, opener, &[])
+        .map_err(|error| format!("Could not reveal {}: {error}", path.display()))
+}
 /// Create the config directory if needed and open it with the desktop's `opener`.
 fn reveal(dir: &Path, opener: &str) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    std::process::Command::new(opener)
-        .arg(dir)
-        .spawn()
-        .map(|mut child| {
-            thread::spawn(move || {
-                let _ = child.wait();
-            });
-        })
-        .map_err(|e| e.to_string())
+    spawn_opener(dir, opener, &[]).map(|mut child| {
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+    })
 }
 pub fn wait_reply<T>(rx: mpsc::Receiver<Result<T, String>>) -> Result<T, String> {
     rx.recv()
