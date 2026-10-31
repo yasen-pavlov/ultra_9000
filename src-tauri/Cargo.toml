@@ -30,10 +30,10 @@ name = "gui_macos"
 harness = false
 
 [build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
-tauri = { version = "=2.12.2", features = ["image-png"] }
+tauri = { version = "=2.12.5", features = ["image-png"] }
 serde = { version = "1", features = ["derive", "rc"] }
 log = { version = "0.4", features = ["std"] }
 libc = "0.2"
@@ -54,7 +54,7 @@ infer = "0.22"
 alacritty_embed = { path = "../vendor/alacritty" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-tauri = { version = "=2.12.2", features = ["tray-icon"] }
+tauri = { version = "=2.12.5", features = ["tray-icon"] }
 # The objc2 0.6 generation that tao/wry use. The vendored terminal keeps objc2 0.5 for its
 # winit-derived view; the embed API takes raw AppKit object pointers, not objc2 types.
 objc2 = "0.6.4"
@@ -143,7 +143,7 @@ gtk = "0.18"
 [dev-dependencies]
 tempfile = "3"
 # Mock runtime (`tauri::test`) for headless command and lifecycle tests.
-tauri = { version = "=2.12.2", features = ["test"] }
+tauri = { version = "=2.12.5", features = ["test"] }
 
 # tests/gui_macos.rs reads the application menu AppKit installed and synthesizes a key event
 # for the application key router.
