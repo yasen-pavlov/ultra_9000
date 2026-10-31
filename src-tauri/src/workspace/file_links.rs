@@ -38,14 +38,9 @@ pub(super) fn validate_origin(origin: &FileOrigin, uri: &str) -> Result<FileTarg
     validate(uri, &origin.cwd, origin.markdown_view, &origin.roots)
 }
 
-/// Runs off-main. URL decoding happens exactly once through Tauri's existing URL library.
-/// Query/fragment metadata is not a filename and does not become Neovim commands.
-pub(super) fn validate(
-    uri: &str,
-    cwd: &str,
-    markdown_view: bool,
-    roots: &[std::path::PathBuf],
-) -> Result<FileTarget, String> {
+/// Decodes a `file:` URI into a local path string. Decoding happens exactly once through Tauri's
+/// existing URL library; query/fragment metadata is not a filename and never becomes an argument.
+fn local_file_path(uri: &str) -> Result<String, String> {
     let invalid = || "This file link is not a valid local file URI.".to_owned();
     let bytes = uri.as_bytes();
     for (index, byte) in bytes.iter().enumerate() {
@@ -86,6 +81,17 @@ pub(super) fn validate(
     if path.contains('\0') {
         return Err(invalid());
     }
+    Ok(path)
+}
+
+/// Runs off-main: decodes the link, then classifies the file by bounded content inspection.
+pub(super) fn validate(
+    uri: &str,
+    cwd: &str,
+    markdown_view: bool,
+    roots: &[std::path::PathBuf],
+) -> Result<FileTarget, String> {
+    let path = local_file_path(uri)?;
     let metadata =
         std::fs::metadata(&path).map_err(|error| format!("Cannot open {path}: {error}."))?;
     if !metadata.is_file() {
@@ -251,7 +257,7 @@ fn inspect_content(reader: &mut impl Read) -> io::Result<Content> {
 fn launcher_path(path: &std::path::Path) -> bool {
     // Safety-specific OS launcher associations, not an editor extension allowlist.
     path.extension()
-        .and_then(|extension| extension.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|extension| {
             [
                 "jar", "jnlp", "desktop", "appimage", "apk", "msi", "lnk", "url", "kdelnk",
@@ -265,7 +271,7 @@ fn launcher_path(path: &std::path::Path) -> bool {
 fn script_path(path: &std::path::Path) -> bool {
     // Only unreadable/non-text script payloads reveal; readable scripts stay editable.
     path.extension()
-        .and_then(|extension| extension.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|extension| {
             ["bat", "cmd", "command", "tool", "py", "pyw", "pyc", "pyo"]
                 .iter()
