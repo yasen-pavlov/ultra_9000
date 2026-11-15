@@ -172,6 +172,14 @@ impl FakeHost {
             message,
         });
     }
+    /// The link reports the item's numbered connection lost (it ended, not superseded).
+    pub(crate) fn omp_lost(&self, id: &str, connection: u64) {
+        omp_link(Delivery {
+            item: id.into(),
+            connection,
+            message: Message::Lost,
+        });
+    }
     /// A process group (`pgid`, `name`) holds the session's terminal; `None` is the prompt.
     pub(crate) fn set_job(&self, key: SessionKey, job: Option<(i32, &str)>) {
         if let Some(session) = self.sessions.borrow_mut().get_mut(&key) {

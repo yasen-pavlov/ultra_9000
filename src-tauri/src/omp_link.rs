@@ -3,11 +3,12 @@
 //!
 //! At startup the app writes the embedded extension into a private runtime directory and
 //! listens on `omp-<pid>.sock` there. Every OMP launch gets the extension (`-e`), the socket
-//! path and the path of a one-shot token file; the token names exactly one item. The
-//! extension reads and deletes the file, so OMP's own subprocesses never learn the token. A
-//! connection sends newline-delimited JSON, first a `hello` carrying the token; a newer
-//! connection with the same token supersedes the older one. The server never writes, and
-//! never logs message contents.
+//! path and the path of a token file `omp-token-<pid>-<random hex>`; the token names exactly
+//! one item. The extension reads and deletes the file, so OMP's own subprocesses never learn
+//! the token, and writes it back at its shutdown so an in-place re-exec (`/restart`) can
+//! reconnect. A connection sends newline-delimited JSON, first a `hello` carrying the token;
+//! connections are numbered by arrival, and a newer one with the same token supersedes the
+//! older one. The server never writes, and never logs message contents.
 use crate::{platform, status::Attention, workspace};
 use serde::Deserialize;
 use std::{
@@ -31,7 +32,8 @@ const EXTENSION_PREFIX: &str = "ultra9000-status-";
 /// Environment of an OMP launch: the socket path and the item's token file.
 pub const LINK_ENV: &str = "ULTRA9000_OMP_LINK";
 pub const TOKEN_FILE_ENV: &str = "ULTRA9000_OMP_TOKEN_FILE";
-/// Name prefix of token files in the runtime directory.
+/// Name prefix of token files in the runtime directory: `omp-token-<app pid>-<random hex>`,
+/// per instance like the socket so quit and later starts can find them.
 const TOKEN_FILE_PREFIX: &str = "omp-token-";
 /// Longest accepted line, newline excluded; a longer one drops the connection.
 const MAX_LINE: usize = 64 * 1024;
@@ -76,6 +78,11 @@ pub enum Message {
     Name {
         name: Option<String>,
     },
+    /// Native only, never decoded from a line: the connection ended while it was its token's
+    /// current one (neither superseded nor ended with the token), so what it reported may no
+    /// longer hold.
+    #[serde(skip_deserializing)]
+    Lost,
 }
 
 /// The main agent's turn state, as the extension reports it.
@@ -163,10 +170,10 @@ pub struct Link {
 }
 
 impl Link {
-    /// Prepare `dir` (private to this user), remove the socket and extension of instances that
-    /// no longer run, write the extension and listen on the socket. Token files of other runs
-    /// are left alone: another instance may share `dir`. Each delivery is handed to `deliver`
-    /// from a connection thread.
+    /// Prepare `dir` (private to this user), remove the sockets, extensions and token files of
+    /// instances that no longer run, write the extension and listen on the socket. Files of
+    /// live instances are left alone: another instance may share `dir`. Each delivery is
+    /// handed to `deliver` from a connection thread.
     pub fn start(
         dir: &Path,
         deliver: impl Fn(Delivery) + Send + Sync + 'static,
@@ -198,13 +205,15 @@ impl Link {
         thread::Builder::new()
             .name("u9k-omp-link".into())
             .spawn(move || {
-                for stream in listener.incoming() {
+                // The one accepting thread numbers connections by arrival, so a hello its
+                // connection thread admits late still counts as the older connection.
+                for (number, stream) in (1..).zip(listener.incoming()) {
                     let Ok(stream) = stream else { continue };
                     let registry = accepting.clone();
                     let deliver = deliver.clone();
                     if let Err(e) = thread::Builder::new()
                         .name("u9k-omp-conn".into())
-                        .spawn(move || serve(stream, &registry, &*deliver))
+                        .spawn(move || serve(stream, number, &registry, &*deliver))
                     {
                         log::warn!("OMP status link: cannot serve a connection: {e}");
                     }
@@ -229,7 +238,9 @@ impl Link {
                 return None;
             }
         };
-        let token_file = self.dir.join(format!("{TOKEN_FILE_PREFIX}{name}"));
+        let token_file = self
+            .dir
+            .join(format!("{TOKEN_FILE_PREFIX}{}-{name}", std::process::id()));
         self.registry
             .register(item, token.clone(), token_file.clone());
         Some(Credentials {
@@ -251,30 +262,37 @@ impl Link {
         self.registry.forget(item);
     }
 
-    /// Remove the socket, the extension and every remaining token file; nothing can connect
-    /// afterwards.
+    /// Remove the socket, the extension and every token file of this instance, including one
+    /// written back after its token ended; nothing can connect afterwards. The socket goes
+    /// first: an extension that writes its token back after this finds no socket and deletes
+    /// the file itself.
     pub fn close(&self) {
         let _ = fs::remove_file(&self.socket);
         let _ = fs::remove_file(&self.extension);
         self.registry.clear();
+        let pid = std::process::id().to_string();
+        for entry in fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            if name.to_str().and_then(token_file_pid_digits) == Some(pid.as_str()) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 }
 
+/// The registered tokens and what each is for.
 #[derive(Default)]
-struct Registry(Mutex<Tokens>);
-
-#[derive(Default)]
-struct Tokens {
-    entries: HashMap<String, Entry>,
-    last_connection: u64,
-}
+struct Registry(Mutex<HashMap<String, Entry>>);
 
 struct Entry {
     item: String,
-    /// The one-shot token file; the extension deletes it once read.
+    /// The token file. Each extension image deletes it once read and writes it back at its
+    /// shutdown for the next image (`/restart`); it goes with the token.
     file: PathBuf,
     /// The current connection and a handle to shut it down.
     connection: Option<(u64, UnixStream)>,
+    /// The newest connection ever admitted for this token, current or not.
+    newest: u64,
 }
 
 impl Entry {
@@ -283,7 +301,7 @@ impl Entry {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
-    /// End this token: close its connection and delete its file if the extension did not.
+    /// End this token: close its connection and delete its file if it is there.
     fn end(&mut self) {
         self.disconnect();
         let _ = fs::remove_file(&self.file);
@@ -291,19 +309,20 @@ impl Entry {
 }
 
 impl Registry {
-    fn tokens(&self) -> std::sync::MutexGuard<'_, Tokens> {
+    fn tokens(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn register(&self, item: &str, token: String, file: PathBuf) {
         let mut tokens = self.tokens();
         Self::end_item(&mut tokens, item);
-        tokens.entries.insert(
+        tokens.insert(
             token,
             Entry {
                 item: item.to_owned(),
                 file,
                 connection: None,
+                newest: 0,
             },
         );
     }
@@ -313,7 +332,6 @@ impl Registry {
     fn issue(&self, credentials: &Credentials) -> Result<(), String> {
         let tokens = self.tokens();
         let entry = tokens
-            .entries
             .get(&credentials.token)
             .filter(|entry| entry.file.as_os_str() == credentials.token_file.as_str())
             .ok_or("the launch was cancelled")?;
@@ -326,13 +344,13 @@ impl Registry {
     }
 
     fn clear(&self) {
-        for (_, mut entry) in self.tokens().entries.drain() {
+        for (_, mut entry) in self.tokens().drain() {
             entry.end();
         }
     }
 
-    fn end_item(tokens: &mut Tokens, item: &str) {
-        tokens.entries.retain(|_, entry| {
+    fn end_item(tokens: &mut HashMap<String, Entry>, item: &str) {
+        tokens.retain(|_, entry| {
             let keep = entry.item != item;
             if !keep {
                 entry.end();
@@ -341,44 +359,51 @@ impl Registry {
         });
     }
 
-    /// Accept `stream` as `token`'s connection, superseding an earlier one. The token file
-    /// has served its purpose and is deleted in case the extension could not.
-    fn connect(&self, token: &str, stream: &UnixStream) -> Option<(String, u64)> {
+    /// Accept `stream`, the `number`th connection to arrive, as `token`'s connection: it
+    /// supersedes the current one. A connection that arrived before the newest one the token
+    /// ever admitted is refused and changes nothing; its hello was admitted late (e.g. the
+    /// old image's, once `/restart` already reconnected). The token file is left alone: an
+    /// image's hello can come after it wrote the file back for the next one.
+    fn connect(&self, token: &str, stream: &UnixStream, number: u64) -> Option<String> {
         let handle = stream.try_clone().ok()?;
         let mut tokens = self.tokens();
-        let number = tokens.last_connection + 1;
-        let entry = tokens.entries.get_mut(token)?;
+        let entry = tokens
+            .get_mut(token)
+            .filter(|entry| number > entry.newest)?;
         entry.disconnect();
-        let _ = fs::remove_file(&entry.file);
         entry.connection = Some((number, handle));
-        let item = entry.item.clone();
-        tokens.last_connection = number;
-        Some((item, number))
+        entry.newest = number;
+        Some(entry.item.clone())
     }
 
     fn is_current(&self, token: &str, connection: u64) -> bool {
         self.tokens()
-            .entries
             .get(token)
             .and_then(|entry| entry.connection.as_ref())
             .is_some_and(|(number, _)| *number == connection)
     }
 
-    fn disconnect(&self, token: &str, connection: u64) {
-        if let Some(entry) = self.tokens().entries.get_mut(token) {
-            if entry
-                .connection
-                .as_ref()
-                .is_some_and(|(number, _)| *number == connection)
-            {
-                entry.disconnect();
-            }
+    /// Close `connection` of `token`; true if it was still the token's current one, i.e. it
+    /// was lost rather than superseded or ended with its token.
+    fn disconnect(&self, token: &str, connection: u64) -> bool {
+        let mut tokens = self.tokens();
+        let Some(entry) = tokens.get_mut(token) else {
+            return false;
+        };
+        let current = entry
+            .connection
+            .as_ref()
+            .is_some_and(|(number, _)| *number == connection);
+        if current {
+            entry.disconnect();
         }
+        current
     }
 }
 
-/// Read one connection until it ends, is superseded or misbehaves.
-fn serve(stream: UnixStream, registry: &Registry, deliver: &dyn Fn(Delivery)) {
+/// Read connection `connection` (its arrival number) until it ends, is superseded or
+/// misbehaves; report a lost one.
+fn serve(stream: UnixStream, connection: u64, registry: &Registry, deliver: &dyn Fn(Delivery)) {
     let Ok(reader) = stream.try_clone() else {
         return;
     };
@@ -388,11 +413,13 @@ fn serve(stream: UnixStream, registry: &Registry, deliver: &dyn Fn(Delivery)) {
     let accepted = read_line(&mut reader, &mut line)
         .then(|| parse_hello(&line))
         .flatten()
-        .and_then(|token| Some((registry.connect(&token, &stream)?, token)));
-    let Some(((item, connection), token)) = accepted else {
-        log::debug!("OMP status link: rejected a connection without a valid hello");
+        .and_then(|token| Some((registry.connect(&token, &stream, connection)?, token)));
+    let Some((item, token)) = accepted else {
+        log::debug!("OMP status link: rejected a connection without a valid, current hello");
         return;
     };
+    // macOS refuses socket options (EINVAL) once the peer has shut the connection down: that
+    // connection is over, like one that reads to its end.
     if stream.set_read_timeout(None).is_ok() {
         while read_line(&mut reader, &mut line) && registry.is_current(&token, connection) {
             if let Some(message) = parse(&line) {
@@ -404,7 +431,13 @@ fn serve(stream: UnixStream, registry: &Registry, deliver: &dyn Fn(Delivery)) {
             }
         }
     }
-    registry.disconnect(&token, connection);
+    if registry.disconnect(&token, connection) {
+        deliver(Delivery {
+            item,
+            connection,
+            message: Message::Lost,
+        });
+    }
 }
 
 /// Read the next complete line into `line` (without its newline). False at the end of the
@@ -448,8 +481,9 @@ pub(crate) fn is_private_dir(dir: &Path) -> bool {
     meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0
 }
 
-/// Remove the sockets and extension of instances whose process is gone (killed or crashed
-/// before their own cleanup). A reused pid only keeps an old file, never removes a live one.
+/// Remove the sockets, extension and token files of instances whose process is gone (killed
+/// or crashed before their own cleanup, or a token file written back after its instance quit).
+/// A reused pid only keeps an old file, never removes a live one.
 fn remove_dead_instances(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -472,8 +506,8 @@ pub(crate) fn process_alive(pid: libc::pid_t) -> bool {
     signalled || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// The app pid in an instance's file name: `omp-<pid>.sock`, `control-<pid>.sock` or
-/// `ultra9000-status-<pid>.ts`.
+/// The app pid in an instance's file name: `omp-<pid>.sock`, `control-<pid>.sock`,
+/// `ultra9000-status-<pid>.ts` or a token file.
 fn instance_pid(name: &str) -> Option<libc::pid_t> {
     let digits = name
         .strip_prefix("omp-")
@@ -482,8 +516,20 @@ fn instance_pid(name: &str) -> Option<libc::pid_t> {
         .or_else(|| {
             name.strip_prefix(EXTENSION_PREFIX)
                 .and_then(|rest| rest.strip_suffix(".ts"))
-        })?;
+        })
+        .or_else(|| token_file_pid_digits(name))?;
     pid_from_digits(digits)
+}
+
+/// The pid digits of a token file name `omp-token-<pid>-<lowercase hex>`; earlier unprefixed
+/// names and anything else do not match.
+fn token_file_pid_digits(name: &str) -> Option<&str> {
+    let (digits, random) = name.strip_prefix(TOKEN_FILE_PREFIX)?.split_once('-')?;
+    let hex = !random.is_empty()
+        && random
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    hex.then_some(digits)
 }
 
 /// A positive pid written as plain decimal digits.

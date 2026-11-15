@@ -514,6 +514,7 @@ mod flows {
     const DONE: &str = r#"{"type":"state","state":"done"}"#;
     const APPROVAL: &str = r#"{"type":"state","state":"needs-you","kind":"approval"}"#;
     const QUESTION: &str = r#"{"type":"state","state":"needs-you","kind":"question"}"#;
+    const IDLE: &str = r#"{"type":"state","state":"idle"}"#;
     /// The `waiting` line for background `bash` jobs (label, start in epoch ms).
     fn waiting(jobs: &[(&str, u64)]) -> String {
         let jobs: Vec<_> = jobs
@@ -1810,6 +1811,259 @@ mod flows {
         assert_eq!(item(&id).activity, Activity::Working);
         host.omp_on(&id, 4, APPROVAL);
         assert_eq!(item(&id).activity, Activity::NeedsYou(Attention::Approval));
+    }
+
+    #[test]
+    fn a_lost_status_link_stops_claiming_a_turn_state_and_announces_nothing() {
+        let host = install();
+        set(|w| w.settings.notify_turn_finished = true);
+        let id = resume(&saved("omp", "s1", "/p/atlas")).unwrap();
+        host.complete(&id);
+        host.omp(
+            &id,
+            r#"{"type":"session","id":"s1","file":"/store/omp/s1.jsonl","cwd":"/p/atlas"}"#,
+        );
+        host.omp(&id, r#"{"type":"model","model":"anthropic/opus"}"#);
+        host.omp(&id, r#"{"type":"name","name":"Fix the link"}"#);
+        host.omp(&id, &waiting(&[("cargo build", 200)]));
+        let published = host.published.borrow().len();
+        host.omp_lost(&id, 1);
+        let row = item(&id);
+        assert_eq!(
+            (row.activity, row.attention, row.unread),
+            (Activity::Unknown, None, false)
+        );
+        assert!(row.background_jobs.is_empty());
+        // Session binding, name and model stay.
+        assert_eq!(
+            (
+                row.title.as_str(),
+                row.model.as_deref(),
+                row.conversation.map(|c| c.id)
+            ),
+            (
+                "Fix the link",
+                Some("anthropic/opus"),
+                Some("s1".to_string())
+            )
+        );
+        assert!(host.notifications.borrow().is_empty());
+        assert_eq!(host.last_published().items[0].activity, Activity::Unknown);
+        assert!(host.published.borrow().len() > published);
+        // A superseded connection closes late: its loss is stale.
+        host.omp_on(&id, 3, WORKING);
+        host.omp_lost(&id, 2);
+        assert_eq!(item(&id).activity, Activity::Working);
+    }
+
+    #[test]
+    fn a_reconnect_reporting_the_lost_state_again_is_not_news() {
+        let host = install();
+        set(|w| w.settings.notify_turn_finished = true);
+        let (id, _) = running(&host, "omp", "/p");
+        // A finished turn the user has not seen yet stays unread across the loss.
+        host.omp(&id, WORKING);
+        host.omp(&id, DONE);
+        set(|w| w.records[0].state.state_since = 7);
+        host.omp_lost(&id, 1);
+        let lost = item(&id);
+        assert_eq!((lost.activity, lost.unread), (Activity::Unknown, true));
+        assert_ne!(lost.state_since, 7);
+        // The extension reconnects and repeats its latest lines.
+        host.omp_on(&id, 2, DONE);
+        let row = item(&id);
+        assert_eq!(
+            (row.activity, row.unread, row.state_since),
+            (Activity::YourTurn, true, 7)
+        );
+        // Once read, a restore does not mark it again.
+        set(|w| w.records[0].state.unread = false);
+        host.omp_lost(&id, 2);
+        host.omp_on(&id, 3, DONE);
+        assert!(!item(&id).unread);
+        // Needs-you and a job list (whose jobs come back with it) restore the same way.
+        host.omp_on(&id, 3, APPROVAL);
+        host.omp_lost(&id, 3);
+        host.omp_on(&id, 4, APPROVAL);
+        assert_eq!(item(&id).activity, Activity::NeedsYou(Attention::Approval));
+        host.omp_on(&id, 4, &waiting(&[("cargo build", 200)]));
+        set(|w| w.records[0].state.state_since = 9);
+        host.omp_lost(&id, 4);
+        host.omp_on(
+            &id,
+            5,
+            &waiting(&[("cargo build", 200), ("bun run test", 300)]),
+        );
+        let row = item(&id);
+        assert_eq!(
+            (row.activity, row.state_since, row.background_jobs.len()),
+            (Activity::OnJob, 9, 2)
+        );
+        assert_eq!(
+            *host.notifications.borrow(),
+            vec![
+                (id.clone(), "OMP".to_string(), "Your turn".to_string()),
+                (id.clone(), "OMP".to_string(), "Needs you".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_restarted_omp_ends_on_a_silent_your_turn() {
+        let host = install();
+        set(|w| w.settings.notify_turn_finished = true);
+        let (id, _) = running(&host, "omp", "/p");
+        host.omp(&id, WORKING);
+        host.omp(&id, DONE);
+        // Seen: the user typed `/restart` in it.
+        set(|w| w.records[0].state.unread = false);
+        let notified = host.notifications.borrow().len();
+        // The old image's connection ends; the new image reports from its startup.
+        host.omp_lost(&id, 1);
+        host.omp_on(&id, 2, IDLE);
+        let row = item(&id);
+        assert_eq!((row.activity, row.unread), (Activity::YourTurn, false));
+        assert_eq!(host.notifications.borrow().len(), notified);
+        // Its next finished turn is announced as usual.
+        host.omp_on(&id, 2, WORKING);
+        host.omp_on(&id, 2, DONE);
+        assert!(item(&id).unread);
+        assert_eq!(host.notifications.borrow().len(), notified + 1);
+    }
+
+    #[test]
+    fn a_different_state_after_a_reconnect_follows_the_usual_rules() {
+        let host = install();
+        set(|w| w.settings.notify_turn_finished = true);
+        let (id, _) = running(&host, "omp", "/p");
+        host.omp(&id, WORKING);
+        host.omp_lost(&id, 1);
+        // Restored working is silent; the turn finishing afterwards is announced.
+        host.omp_on(&id, 2, WORKING);
+        assert_eq!(item(&id).activity, Activity::Working);
+        host.omp_on(&id, 2, DONE);
+        assert!(item(&id).unread);
+        assert_eq!(host.notifications.borrow().len(), 1);
+        // A turn that finished while disconnected is announced on reconnect.
+        host.omp_on(&id, 2, WORKING);
+        host.omp_lost(&id, 2);
+        set(|w| w.records[0].state.unread = false);
+        host.omp_on(&id, 3, DONE);
+        assert!(item(&id).unread);
+        assert_eq!(host.notifications.borrow().len(), 2);
+        // A new session's state is never the lost one restored: not its time ...
+        host.omp_on(&id, 3, WORKING);
+        set(|w| w.records[0].state.state_since = 5);
+        host.omp_lost(&id, 3);
+        host.omp_on(
+            &id,
+            4,
+            r#"{"type":"session","id":"s2","file":null,"cwd":"/p"}"#,
+        );
+        host.omp_on(&id, 4, WORKING);
+        assert_ne!(item(&id).state_since, 5);
+        // ... nor its silence: a new session's finished turn is announced.
+        host.omp_on(&id, 4, DONE);
+        set(|w| w.records[0].state.unread = false);
+        host.omp_lost(&id, 4);
+        host.omp_on(
+            &id,
+            5,
+            r#"{"type":"session","id":"s3","file":null,"cwd":"/p"}"#,
+        );
+        host.omp_on(&id, 5, DONE);
+        assert!(item(&id).unread);
+        assert_eq!(host.notifications.borrow().len(), 4);
+    }
+
+    #[test]
+    fn a_loss_holds_only_the_last_reported_state() {
+        let host = install();
+        let (id, _) = running(&host, "omp", "/p");
+        // Lost before OMP reported any state: nothing is held, so nothing is restored.
+        host.omp_lost(&id, 1);
+        assert_eq!(item(&id).activity, Activity::Unknown);
+        set(|w| w.records[0].state.state_since = 3);
+        host.omp_on(&id, 2, WORKING);
+        assert_ne!(item(&id).state_since, 3);
+        // A second loss before any report keeps what the first one held.
+        set(|w| w.records[0].state.state_since = 7);
+        host.omp_lost(&id, 2);
+        host.omp_lost(&id, 3);
+        assert_eq!(
+            close_reporting(&id, false),
+            Ok(CloseOutcome::NeedsConfirmation(CloseReason::AgentWorking))
+        );
+        host.omp_on(&id, 4, WORKING);
+        let row = item(&id);
+        assert_eq!((row.activity, row.state_since), (Activity::Working, 7));
+    }
+
+    #[test]
+    fn closing_after_a_lost_link_weighs_the_state_held_at_the_loss() {
+        let on_job = waiting(&[("cargo build", 200)]);
+        for (line, reason) in [
+            (WORKING, Some(CloseReason::AgentWorking)),
+            (on_job.as_str(), Some(CloseReason::AgentWorking)),
+            (APPROVAL, Some(CloseReason::AgentNeedsYou)),
+            (DONE, None),
+            (IDLE, None),
+        ] {
+            let host = install();
+            let (id, key) = running(&host, "omp", "/p");
+            host.omp(&id, line);
+            host.omp_lost(&id, 1);
+            assert_eq!(item(&id).activity, Activity::Unknown);
+            match reason {
+                Some(reason) => {
+                    // Losing the link is no evidence that stopping is safe, from the control
+                    // socket or the app.
+                    assert_eq!(
+                        close_reporting(&id, false),
+                        Ok(CloseOutcome::NeedsConfirmation(reason)),
+                        "{line}"
+                    );
+                    assert_eq!(close(&id, false).unwrap(), "confirm", "{line}");
+                    sheet_close().unwrap();
+                    // Until a fresh report says otherwise.
+                    host.omp_on(&id, 2, IDLE);
+                    assert_eq!(close_reporting(&id, false), Ok(CloseOutcome::Closed));
+                }
+                None => assert_eq!(close(&id, false).unwrap(), "closed", "{line}"),
+            }
+            assert_eq!(host.calls_of("stop"), vec![key], "{line}");
+        }
+    }
+
+    #[test]
+    fn a_lost_link_changes_nothing_on_rows_whose_process_is_over() {
+        let host = install();
+        let (id, key) = running(&host, "omp", "/p");
+        host.omp(&id, WORKING);
+        host.exit(key, Some(1));
+        let exited = item(&id);
+        host.omp_lost(&id, 1);
+        assert_eq!(item(&id), exited);
+        let failed = launch("omp", "/p");
+        host.fail(&failed, "not on PATH");
+        let row = item(&failed);
+        host.omp_lost(&failed, 1);
+        assert_eq!(item(&failed), row);
+    }
+
+    #[test]
+    fn an_exit_just_after_its_link_is_lost_announces_nothing_of_its_own() {
+        let host = install();
+        set(|w| w.settings.notify_turn_finished = true);
+        let (id, key) = running(&host, "omp", "/p");
+        host.omp(&id, APPROVAL);
+        host.notifications.borrow_mut().clear();
+        // OMP's socket closes just before its exit is observed.
+        host.omp_lost(&id, 1);
+        host.exit(key, Some(1));
+        let row = item(&id);
+        assert_eq!((row.activity, row.unread), (Activity::Error, false));
+        assert!(host.notifications.borrow().is_empty());
     }
 
     #[test]
