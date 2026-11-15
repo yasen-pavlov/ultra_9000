@@ -7,19 +7,22 @@
  * to server only. It only observes OMP: it registers no tools, commands or shortcuts and never
  * writes to the session. Without a usable socket path and token it does nothing.
  *
- * OMP evaluates this module once per process and rebinds the default-export factory for every
- * subagent, advisor and `/tan` clone it runs in-process, so the link and the state machine live at
- * module level and each handler filters on `ctx.agent.kind`.
+ * OMP evaluates this module once per process image (`/restart` re-executes OMP, which loads it
+ * afresh) and rebinds the default-export factory for every subagent, advisor and `/tan` clone it
+ * runs in-process, so the link and the state machine live at module level and each handler
+ * filters on `ctx.agent.kind`.
  */
-import { readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
+
+type Link = { path: string; token: string; tokenFile: string };
 
 /**
  * Reads the link once at load. The token arrives in a one-shot file that is removed right away:
  * JS cannot unset variables in the native environment that OMP's tool subprocesses inherit, so
  * they only ever see the socket path and the name of a file that no longer exists.
  */
-function readLink(): { path: string; token: string } | undefined {
+function readLink(): Link | undefined {
   const path = process.env.ULTRA9000_OMP_LINK;
   const tokenFile = process.env.ULTRA9000_OMP_TOKEN_FILE;
   delete process.env.ULTRA9000_OMP_LINK;
@@ -32,9 +35,23 @@ function readLink(): { path: string; token: string } | undefined {
   } catch {
     // A missing or unreadable token file leaves the extension inert.
   }
-  return path && /^[0-9a-f]{32}$/.test(token) ? { path, token } : undefined;
+  return path && /^[0-9a-f]{32}$/.test(token) ? { path, token, tokenFile } : undefined;
 }
 const LINK = readLink();
+
+/**
+ * Writes the token back for the next image of this process. `/restart` re-executes OMP in
+ * place: same process, same native environment, so the new image loads this module again,
+ * reads the same file path and deletes the file. The app deletes it when the process ends and
+ * when it quits, never at a hello (this image's own may be admitted only now); it removes its
+ * socket before the files at quit, so a file written after the socket is gone is deleted here,
+ * as nobody else would.
+ */
+function reissue(link: Link): void {
+  // Exclusive create: never follows or replaces whatever else holds the name.
+  writeFileSync(link.tokenFile, link.token, { mode: 0o600, flag: "wx" });
+  if (!existsSync(link.path)) unlinkSync(link.tokenFile);
+}
 
 const POLL_MS = 500;
 /** Quiet polls (10 s) after which a run whose start/end counts never balance settles as idle. */
@@ -120,6 +137,11 @@ let lastEndContinues = false;
 let ompVersion = "unknown";
 let socket: Socket | undefined;
 let lastConnectAt = -Infinity;
+/**
+ * Set at the main session's shutdown, which OMP emits once per process image, right before it
+ * exits or re-executes itself: the token then belongs to the next image, and a reconnect from
+ * this one would make the app delete its file.
+ */
 let closed = false;
 let poll: unknown;
 const latest = new Map<Kind, string>();
@@ -216,7 +238,7 @@ function flush(): void {
   }
 }
 
-function connect(link: { path: string; token: string }): Socket {
+function connect(link: Link): Socket {
   lastConnectAt = Date.now();
   sent.clear();
   const connection = createConnection(link.path);
@@ -317,6 +339,7 @@ export default function ultra9000Status(pi: ExtensionApi): void {
     closed = true;
     socket?.end();
     socket = undefined;
+    reissue(LINK);
   });
 
   listen("main", "agent_start", () => {

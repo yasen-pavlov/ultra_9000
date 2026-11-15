@@ -17,6 +17,7 @@ use crate::{
 use alacritty_embed::embed::{self, Launch, SessionKey, TerminalState, ViewportRect};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, VecDeque},
     ffi::c_void,
@@ -312,6 +313,10 @@ struct OmpStatus {
     connection: u64,
     session: Option<String>,
     state: Option<omp_link::State>,
+    /// The turn state and its `state_since` when the newest connection was lost, kept until
+    /// the next state report or session change: one that reports the same state restores it
+    /// rather than announcing it again, and closing weighs it meanwhile.
+    lost: Option<(omp_link::State, u64)>,
     name: Option<String>,
     /// OMP reported the item's model (possibly none); discovery no longer sets it.
     model_reported: bool,
@@ -1208,7 +1213,7 @@ fn close_item(id: &str, confirmed: bool, ask_in_app: bool) -> Result<CloseOutcom
         };
         if !confirmed {
             if let Some(reason) = close_reason(
-                &record.state,
+                &record.close_view(),
                 record
                     .spec
                     .as_ref()
@@ -1634,6 +1639,11 @@ fn link_activity(state: &omp_link::State) -> Activity {
         omp_link::State::Error => Activity::Error,
     }
 }
+/// Whether two reports name the same turn state; a `waiting` job list is detail, not identity.
+fn same_turn(a: &omp_link::State, b: &omp_link::State) -> bool {
+    use omp_link::State::Waiting;
+    matches!((a, b), (Waiting { .. }, Waiting { .. })) || a == b
+}
 pub fn key_action(key: &embed::AppKey) -> Option<Action> {
     let named = key.named.map(|named| match named {
         embed::NamedKey::PageUp => Key::PageUp,
@@ -1877,6 +1887,17 @@ impl Record {
         self.state.title = title;
         true
     }
+    /// The item as closing weighs it: after a lost link, the turn state held at the loss until
+    /// a fresh report, as losing the link is no evidence that stopping the agent is safe.
+    fn close_view(&self) -> Cow<'_, ItemState> {
+        match self.omp.as_ref().and_then(|o| o.lost.as_ref()) {
+            Some((state, _)) => Cow::Owned(ItemState {
+                activity: link_activity(state),
+                ..self.state.clone()
+            }),
+            None => Cow::Borrowed(&self.state),
+        }
+    }
     /// Your turn without a finished turn to announce: OMP reported `idle` (an aborted turn, a
     /// new or switched session). It neither marks the item unread nor notifies.
     fn quiet(&self) -> bool {
@@ -2103,8 +2124,8 @@ impl Workspace {
         };
         let presented = self.is_presented(index);
         let record = &mut self.records[index];
-        let before = record.observed();
-        let was_quiet = record.quiet();
+        let mut before = record.observed();
+        let mut was_quiet = record.quiet();
         let Some(link) = record.omp.as_mut() else {
             return Ok(());
         };
@@ -2112,12 +2133,15 @@ impl Workspace {
             return Ok(());
         }
         link.connection = delivery.connection;
+        let mut restored = None;
         let changed = match delivery.message {
             Message::Session { id } => {
                 if link.session.as_deref() == Some(id.as_str()) {
                     false
                 } else {
                     link.session = Some(id.clone());
+                    // Another session's state is news, never the lost one restored.
+                    link.lost = None;
                     let reset = record.start_session(&id, &mut self.discovery_revision);
                     if reset {
                         record.refresh_title();
@@ -2134,8 +2158,13 @@ impl Workspace {
                 let jobs: Vec<BackgroundJob> = jobs.into_iter().map(Into::into).collect();
                 let changed = record.state.background_jobs != jobs;
                 record.state.background_jobs = jobs;
+                restored = link
+                    .lost
+                    .take()
+                    .filter(|(lost, _)| same_turn(lost, &state))
+                    .map(|(_, since)| since);
                 link.state = Some(state);
-                changed
+                changed || restored.is_some()
             }
             Message::Model { model } => {
                 link.model_reported = true;
@@ -2147,7 +2176,22 @@ impl Workspace {
                 link.name = name;
                 record.refresh_title()
             }
+            Message::Lost => {
+                // The row stops claiming a turn state (and its jobs); session, name and model
+                // stay. Unknown is never announced, and an unseen finished turn stays unread.
+                if let Some(state) = link.state.take() {
+                    link.lost = Some((state, record.state.state_since));
+                }
+                false
+            }
         };
+        if let Some(since) = restored {
+            // A reconnect reporting the state held at the loss is the same fact: compared with
+            // itself it announces nothing, and it keeps its time.
+            record.state.state_since = since;
+            before.1 = record.derived_activity();
+            was_quiet = record.quiet();
+        }
         self.settle(index, presented, (before, was_quiet), changed)
     }
     /// Re-derives an updated item's activity: unread and desktop notification for an

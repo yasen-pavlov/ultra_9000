@@ -42,7 +42,8 @@ fn next(rx: &mpsc::Receiver<Delivery>) -> Delivery {
 fn nothing_more(rx: &mpsc::Receiver<Delivery>) {
     assert_eq!(rx.recv_timeout(Duration::from_millis(200)).ok(), None);
 }
-/// The server closed the connection (it never writes, so a read only sees the end).
+/// The server closed the connection (it never writes, so a read only sees the end, or a reset
+/// when it closed with lines of ours still unread).
 fn closed(stream: &mut UnixStream) -> bool {
     closed_within(stream, Duration::from_secs(5))
 }
@@ -53,7 +54,10 @@ fn closed_within(stream: &mut UnixStream, wait: Duration) -> bool {
         Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => return true,
         Err(e) => panic!("cannot set a read timeout: {e}"),
     }
-    matches!(stream.read(&mut [0u8; 1]), Ok(0))
+    match stream.read(&mut [0u8; 1]) {
+        Ok(read) => read == 0,
+        Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
+    }
 }
 fn working() -> Message {
     Message::State(State::Working)
@@ -97,18 +101,21 @@ fn start_prepares_a_private_runtime_dir_extension_and_socket() {
     let runtime = dir.path().join("ultra-9000");
     fs::create_dir(&runtime).unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
-    // A token file of another instance sharing the directory is left alone.
+    // Token files of an earlier unprefixed or unknown name are left alone.
     fs::write(runtime.join("omp-token-0123"), "other").unwrap();
     // Files of an instance that still runs stay; those of one that is gone are removed.
     let mut child = std::process::Command::new("true").spawn().unwrap();
     let dead = child.id();
     child.wait().unwrap();
+    let odd = runtime.join(format!("omp-token-{dead}-NOTHEX"));
+    fs::write(&odd, "other").unwrap();
     let live = std::os::unix::process::parent_id();
     let instance = |pid: u32| {
         [
             runtime.join(format!("omp-{pid}.sock")),
             runtime.join(format!("control-{pid}.sock")),
             runtime.join(format!("ultra9000-status-{pid}.ts")),
+            runtime.join(format!("omp-token-{pid}-0123abcd")),
         ]
     };
     for file in instance(dead).iter().chain(&instance(live)) {
@@ -119,6 +126,7 @@ fn start_prepares_a_private_runtime_dir_extension_and_socket() {
         fs::read_to_string(runtime.join("omp-token-0123")).unwrap(),
         "other"
     );
+    assert!(odd.exists());
     assert!(instance(dead).iter().all(|f| !f.exists()));
     assert!(instance(live).iter().all(|f| f.exists()));
 
@@ -141,14 +149,15 @@ fn start_prepares_a_private_runtime_dir_extension_and_socket() {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
     }
     assert_ne!(first.token, second.token);
-    // The token file's name does not reveal the token.
+    // The token file's name names this instance, not the token.
+    let own = format!("omp-token-{}-", std::process::id());
     for c in [&first, &second] {
         let name = Path::new(&c.token_file)
             .file_name()
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(name.starts_with("omp-token-"));
+        assert!(name.starts_with(&own), "{name}");
         assert!(!name.contains(&c.token));
         assert_eq!(Path::new(&c.token_file).parent(), Some(runtime.as_path()));
     }
@@ -161,10 +170,9 @@ fn start_prepares_a_private_runtime_dir_extension_and_socket() {
     assert!(!extension.exists());
     assert!(!Path::new(&first.token_file).exists());
     assert!(!Path::new(&second.token_file).exists());
-    assert!(
-        runtime.join("omp-token-0123").exists(),
-        "only its own tokens"
-    );
+    // Only its own tokens: a live instance's and unknown names stay.
+    assert!(runtime.join("omp-token-0123").exists());
+    assert!(instance(live).iter().all(|f| f.exists()));
 }
 
 #[test]
@@ -203,7 +211,7 @@ fn token_files_are_private_one_shot_and_end_with_their_token() {
     assert_eq!(next(&running.rx).message, working());
     assert!(!closed_soon(&mut stream));
 
-    // A connection deletes a file the extension left behind.
+    // A hello leaves the file alone (it may already be the next image's); it goes with the token.
     let third = running.link.register("item-3").unwrap();
     running.link.issue(&third).unwrap();
     let _stream = connect(
@@ -214,6 +222,8 @@ fn token_files_are_private_one_shot_and_end_with_their_token() {
         ],
     );
     next(&running.rx);
+    assert!(Path::new(&third.token_file).exists());
+    running.link.forget("item-3");
     assert!(!Path::new(&third.token_file).exists());
 
     // Forgetting an item deletes its unread file, and a later issue writes nothing.
@@ -324,6 +334,8 @@ fn an_oversized_line_drops_the_connection() {
     );
     let _ = stream.write_all(oversized.as_bytes());
     assert!(closed(&mut stream));
+    // The connection was the token's current one: its end is a loss.
+    assert_eq!(next(&running.rx).message, Message::Lost);
     nothing_more(&running.rx);
 }
 
@@ -341,6 +353,8 @@ fn a_new_connection_with_the_same_token_supersedes_the_old_one() {
     assert!(second.connection > first.connection);
     assert!(closed(&mut old));
     assert!(!closed_soon(&mut new));
+    // A superseded connection ending is not a loss.
+    drop(old);
     nothing_more(&running.rx);
 }
 
@@ -362,6 +376,8 @@ fn forgetting_or_registering_again_invalidates_the_old_token() {
     assert_eq!(next(&running.rx).message, working());
     running.link.forget("item-1");
     assert!(closed(&mut stream));
+    // A connection ended with its token is not a loss either.
+    drop(stream);
     let mut stream = connect(&running.link, &[&hello(&new)]);
     assert!(closed(&mut stream));
     nothing_more(&running.rx);
@@ -421,4 +437,143 @@ fn every_message_kind_decodes() {
     assert_eq!(parsed(&hello(&"a".repeat(32))), None);
     assert_eq!(parsed(r#"{"type":"session"}"#), None);
     assert_eq!(parsed(r#"["state"]"#), None);
+    // A loss is the server's own notice; no line can claim one.
+    assert_eq!(parsed(r#"{"type":"lost"}"#), None);
+}
+
+#[test]
+fn a_dropped_connection_is_lost_and_its_token_reconnects() {
+    let running = start();
+    let credentials = running.link.register("item-1").unwrap();
+    running.link.issue(&credentials).unwrap();
+    let file = Path::new(&credentials.token_file);
+    // The extension reads and deletes its file, says hello and reports.
+    fs::remove_file(file).unwrap();
+    let hello = hello(&credentials.token);
+    let state = r#"{"type":"state","state":"working"}"#;
+    let stream = connect(&running.link, &[&hello, state]);
+    let first = next(&running.rx);
+    drop(stream);
+    assert_eq!(
+        next(&running.rx),
+        Delivery {
+            item: "item-1".into(),
+            connection: first.connection,
+            message: Message::Lost,
+        }
+    );
+    // `/restart`: the shutting-down image wrote the token back; the next one reads and deletes
+    // it, then says hello with it.
+    fs::write(file, &credentials.token).unwrap();
+    assert_eq!(fs::read_to_string(file).unwrap(), credentials.token);
+    fs::remove_file(file).unwrap();
+    let mut again = connect(&running.link, &[&hello, state]);
+    let second = next(&running.rx);
+    assert_eq!(
+        (second.item.as_str(), second.message),
+        ("item-1", working())
+    );
+    assert!(second.connection > first.connection);
+    assert!(!closed_soon(&mut again));
+    nothing_more(&running.rx);
+}
+
+#[test]
+fn a_late_hello_from_the_old_image_leaves_the_next_images_token_file() {
+    let running = start();
+    let credentials = running.link.register("item-1").unwrap();
+    running.link.issue(&credentials).unwrap();
+    let file = Path::new(&credentials.token_file);
+    let hello = hello(&credentials.token);
+    let state = r#"{"type":"state","state":"working"}"#;
+    // The old image read its file and connected, but its hello is admitted only after its
+    // shutdown wrote the token back for the next image.
+    fs::remove_file(file).unwrap();
+    fs::write(file, &credentials.token).unwrap();
+    let old = connect(&running.link, &[&hello, state]);
+    let first = next(&running.rx);
+    assert!(file.exists(), "admitting the old hello keeps the file");
+    drop(old);
+    assert_eq!(next(&running.rx).message, Message::Lost);
+    // The next image loads like a first launch and is accepted.
+    assert_eq!(fs::read_to_string(file).unwrap(), credentials.token);
+    fs::remove_file(file).unwrap();
+    let mut new = connect(&running.link, &[&hello, state]);
+    let second = next(&running.rx);
+    assert_eq!(
+        (second.message, second.item.as_str()),
+        (working(), "item-1")
+    );
+    assert!(second.connection > first.connection);
+    assert!(!closed_soon(&mut new));
+    nothing_more(&running.rx);
+}
+
+#[test]
+fn a_connection_closed_right_after_its_hello_is_lost() {
+    // macOS refuses socket options once the peer has gone: such a connection ends like any other.
+    let running = start();
+    let token = running.link.register("item-1").unwrap().token;
+    drop(connect(&running.link, &[&hello(&token)]));
+    let lost = next(&running.rx);
+    assert_eq!(
+        (lost.item.as_str(), lost.message),
+        ("item-1", Message::Lost)
+    );
+    nothing_more(&running.rx);
+}
+
+#[test]
+fn a_token_file_written_back_after_its_token_ended_goes_at_quit() {
+    let running = start();
+    let first = running.link.register("item-1").unwrap();
+    running.link.issue(&first).unwrap();
+    let file = Path::new(&first.token_file);
+    fs::remove_file(file).unwrap();
+    let _stream = connect(
+        &running.link,
+        &[
+            &hello(&first.token),
+            r#"{"type":"state","state":"working"}"#,
+        ],
+    );
+    next(&running.rx);
+    // The item's end is seen while its OMP still unwinds, which then writes its token back:
+    // a dead token, left until this instance quits.
+    running.link.forget("item-1");
+    fs::write(file, &first.token).unwrap();
+    let mut stream = connect(&running.link, &[&hello(&first.token)]);
+    assert!(closed(&mut stream));
+    assert!(file.exists());
+    running.link.close();
+    assert!(!file.exists());
+    // Connections ended with their token, by forgetting or quitting, are not losses.
+    nothing_more(&running.rx);
+}
+
+#[test]
+fn a_hello_admitted_after_a_newer_connection_arrived_is_refused() {
+    let running = start();
+    let token = running.link.register("item-1").unwrap().token;
+    let hello = hello(&token);
+    // The old image connected first, but its hello and last report are read only after the
+    // restarted image connected and reported.
+    let mut old = UnixStream::connect(&running.link.socket).unwrap();
+    let mut new = connect(
+        &running.link,
+        &[&hello, r#"{"type":"state","state":"working"}"#],
+    );
+    let current = next(&running.rx);
+    assert_eq!(current.message, working());
+    send(&mut old, &[&hello, r#"{"type":"state","state":"done"}"#]);
+    assert!(closed(&mut old));
+    // Nothing from the old connection, no loss, and the new one stays current.
+    assert!(!closed_soon(&mut new));
+    nothing_more(&running.rx);
+    send(&mut new, &[r#"{"type":"state","state":"idle"}"#]);
+    let after = next(&running.rx);
+    assert_eq!(
+        (after.connection, after.message),
+        (current.connection, Message::State(State::Idle))
+    );
 }
