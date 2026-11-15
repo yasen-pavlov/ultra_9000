@@ -275,7 +275,11 @@ function hasMath(tree: MdastRoot): boolean {
 
 let katexPlugin: Promise<Pluggable> | null = null;
 
-/** rehype-katex with its stylesheet and fonts, fetched the first time a document has math. */
+/**
+ * rehype-katex with its stylesheet and fonts, fetched the first time a document has math. The
+ * stylesheet comes from the top-level `katex`; package.json `overrides` keep rehype-katex on that
+ * same copy, so the CSS always matches the markup it renders.
+ */
 function loadKatex(): Promise<Pluggable> {
   katexPlugin ??= Promise.all([import("rehype-katex"), import("katex/dist/katex.min.css")]).then(([module]) => [
     module.default,

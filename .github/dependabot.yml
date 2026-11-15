@@ -35,10 +35,6 @@ updates:
       # TS 7 has no JS compiler API for typescript-eslint/svelte-check; revisit when typescript-eslint#10940 closes.
       - dependency-name: typescript
         versions: ["7.x"]
-      # rehype-katex 7 and micromark-extension-math depend on katex ^0.16; a newer top-level
-      # katex ships a second copy and mismatched CSS. Revisit when rehype-katex moves.
-      - dependency-name: katex
-        versions: [">=0.17"]
 
   - package-ecosystem: github-actions
     directory: /

@@ -1,3 +1,4 @@
+import katex from "katex";
 import { describe, expect, it, vi } from "vitest";
 import { loadHighlighter } from "./highlight";
 import { renderMarkdown, type RenderOptions } from "./render";
@@ -149,11 +150,25 @@ describe("renderMarkdown structure", () => {
     expect(result.needsHighlighter).toBe(false);
   });
 
-  it("renders math with KaTeX", async () => {
-    const { html } = await renderMarkdown("Inline $x^2$ and\n\n$$\n\\frac{a}{b}\n$$", options());
+  it("renders inline and display math with KaTeX's markup intact after sanitising", async () => {
+    const { html } = await renderMarkdown("Inline $\\sqrt{x^2}$ here.\n\n$$\n\\frac{a}{b}\n$$", options());
     const root = dom(html);
-    expect(root.querySelectorAll(".katex").length).toBeGreaterThanOrEqual(2);
-    expect(root.querySelector("annotation")?.textContent).toBe("x^2");
+    const inline = root.querySelector("p > .katex");
+    expect(inline?.querySelector("annotation")?.textContent).toBe("\\sqrt{x^2}");
+    expect(root.querySelector(".katex-display > .katex math")?.getAttribute("display")).toBe("block");
+    // The visible half keeps everything KaTeX's stylesheet keys on: classes, inline geometry, stretchy SVG.
+    const direct = dom(katex.renderToString("\\sqrt{x^2}", { output: "htmlAndMathml", strict: "ignore" }));
+    expect(inline?.querySelector(".katex-html")?.outerHTML).toBe(direct.querySelector(".katex-html")?.outerHTML);
+    expect(inline?.querySelector(".katex-html svg path[d]")).not.toBeNull();
+  });
+
+  it("shows an invalid expression as KaTeX's error text and still renders the rest", async () => {
+    const { html } = await renderMarkdown("Bad $\\frac{a$ then $y$.", options());
+    const root = dom(html);
+    const error = root.querySelector(".katex-error");
+    expect(error?.textContent).toBe("\\frac{a");
+    expect(error?.getAttribute("title")).toMatch(/ParseError/);
+    expect(root.querySelector(".katex annotation")?.textContent).toBe("y");
   });
 
   it("marks numeric table cells", async () => {
